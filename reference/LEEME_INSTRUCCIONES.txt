@@ -1,0 +1,107 @@
+INVENTARIO BETTERWARE — INSTRUCCIONES
+========================================
+
+QUÉ HACE ESTE PROGRAMA
+-----------------------
+Lee tus remisiones/facturas de pedido de Betterware (PDF), controla tu
+inventario, tus ventas, lo que entregas a asociados y tu directorio de
+contactos — todo desde una sola ventana con pestañas, sin necesidad de
+tocar Excel para el trabajo del día a día.
+
+
+PASO 1 — Preparar el programa (SOLO UNA VEZ)
+---------------------------------------------
+1. Copia toda esta carpeta a tu computadora (por ejemplo, en el
+   Escritorio, en una carpeta llamada "Inventario Betterware").
+2. Necesitas tener internet la primera vez.
+3. Haz doble clic en el archivo:
+
+       generar_ejecutable.bat
+
+4. Se abrirá una ventana negra (no te asustes, es normal) que va a
+   instalar lo necesario y armar el programa. Puede tardar unos
+   minutos. Cuando termine, dirá "LISTO".
+5. Entra a la carpeta que se llama "dist". Ahí vas a encontrar:
+
+       InventarioBetterware.exe
+
+   Ese es tu programa. Puedes moverlo a donde quieras (por ejemplo
+   al Escritorio) y ya no necesitas nada más de esta carpeta ni
+   internet para usarlo.
+
+   (Si no tienes Python instalado, el .bat te va a avisar. Descarga
+   Python de https://www.python.org/downloads/ y durante la
+   instalación marca la casilla "Add Python to PATH" antes de
+   volver a intentar el paso 3.)
+
+
+PASO 2 — Las pestañas del programa
+-------------------------------------
+
+📊 DASHBOARD
+   Resumen general: piezas en stock, valor de tu inventario, ventas
+   registradas, ganancia total, pedidos cargados, y cuánto te deben
+   pagar los asociados. Abajo, la lista de productos con poco
+   inventario (se marcan en rojo).
+
+📦 INVENTARIO
+   Todos tus productos con piezas recibidas, vendidas y disponibles,
+   y tu costo unitario real. Busca por código o nombre. Puedes
+   seleccionar un producto y presionar "Registrar venta de este
+   producto" para venderlo directo desde aquí.
+
+🧾 PEDIDOS
+   El historial completo de todo lo que has cargado de tus PDFs,
+   con filtros por producto/código, por nombre de asociado, por
+   semana y por folio. Aquí ves también cómo se repartió cada
+   producto (Asociado / Casa / Local).
+
+🛒 VENTAS
+   Historial de ventas. Botón "Registrar venta" para capturar una
+   nueva: buscas el producto (por código o nombre), pones cantidad,
+   precio público y forma de pago. Si no hay inventario suficiente,
+   el programa no te deja continuar.
+
+🤝 ENTREGAS ASOCIADO
+   Cada vez que marcas piezas como "Asociado" al cargar un pedido,
+   aparecen aquí automáticamente con el monto que te deben pagar.
+   Doble clic sobre una entrega para cambiar su Status (Pendiente de
+   recoger / Recogido - no pagado / Pagado) y registrar el pago
+   (hasta 2 formas de pago distintas, por si te pagan una parte en
+   efectivo y otra por transferencia, por ejemplo).
+
+👥 ASOCIADOS
+   Tu directorio: nombre, teléfono y notas de cada asociado. Botón
+   "Enviar WhatsApp" que te abre WhatsApp Web directo con ese
+   contacto (puedes escribir un mensaje que se precarga solo).
+
+
+PASO 3 — Cargar un pedido nuevo
+-----------------------------------
+1. Botón "📄 Cargar PDF(s)" (arriba de la ventana).
+2. Elige uno o varios PDFs de tus remisiones.
+3. Se abre una VISTA PREVIA con todos los productos. Aquí puedes:
+    - Doble clic sobre "Cant. total", "Asociado", "Casa", "Local",
+      "Precio catálogo", "Precio con IVA" o "Precio que pagas" para
+      corregir cualquier valor (útil para productos de promoción o
+      de regalo, y para repartir dónde quedó cada pieza).
+    - Asociado + Casa + Local debe sumar la Cant. total; el programa
+      no te deja pasarte ni te deja confirmar si no cuadra.
+    - Lo que pongas en "Asociado" no cuenta como tu inventario; lo
+      que pongas en "Casa" o "Local" sí.
+4. "Confirmar y cargar al inventario" (o "Cancelar" si algo no
+   cuadra).
+
+Puedes cargar PDFs las veces que quieras; nunca se borra lo que ya
+tenías (ventas, entregas, directorio de asociados, etc.).
+
+
+NOTAS
+-----
+- El Excel ("inventario_betterware.xlsx") sigue existiendo como
+  respaldo/consulta, pero ya no necesitas escribir nada ahí a mano —
+  todo el trabajo del día a día se hace desde el programa.
+- El programa no necesita internet para funcionar (solo para
+  instalarlo la primera vez).
+- No modifiques el nombre del archivo Excel ni lo muevas de la
+  carpeta del programa.

@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.py[cod]
+*.db
+*.db-journal
+backups/
+*.log
+build/
+dist/
+*.spec
