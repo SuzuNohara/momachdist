@@ -8,6 +8,7 @@ catalogo, necesario para satisfacer la FK del detalle) y de `core_asociados`
 * `guardar_pedido`          -- cabecera idempotente por folio.
 * `guardar_pedido_detalle`  -- lineas del pedido, sin duplicar.
 * `confirmar_carga`         -- orquestador transaccional del lote completo.
+* `obtener_movimientos`     -- lectura del historial para la pestana de pedidos.
 * `CargaError`              -- error de dominio de la carga de remisiones.
 """
 
@@ -56,6 +57,37 @@ INSERT INTO pedido_detalle (
     valor_total_con_iva, tipo)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT (pedido_id, codigo_articulo, tipo, ocurrencia) DO NOTHING
+"""
+
+#: Historial de movimientos para la pestana de pedidos de la GUI (MERC-06).
+#:
+#: Sentencia estatica y sin parametros: el filtrado sigue siendo client-side en
+#: `_aplicar_filtro`, de modo que nunca se interpola entrada de usuario en SQL.
+#: Los alias reproducen literalmente las claves que el Treeview ya consumia del
+#: Excel, para que el cuerpo del filtro no cambie.
+#:
+#: `productos` va con INNER JOIN porque la FK `RESTRICT` del detalle garantiza
+#: el match; `asociados` y `semanas_catalogo` van con LEFT JOIN porque
+#: `asociado_id` y `semana_id` son nullable. El `COALESCE` del nombre degrada al
+#: texto del PDF y, en ultima instancia, a cadena vacia.
+SELECT_MOVIMIENTOS_SQL: Final[str] = """
+SELECT
+    COALESCE(sc.semana_texto, '')                    AS "Semana",
+    ped.folio_pedido                                 AS "Folio de pedido",
+    pd.codigo_articulo                               AS "Codigo articulo",
+    pr.descripcion                                   AS "Descripcion",
+    COALESCE(a.nombre, ped.nombre_asociado_pdf, '')  AS "Nombre asociado",
+    pd.cantidad_surtida                              AS "Cantidad surtida",
+    pd.cantidad_asociado                             AS "Cantidad Asociado",
+    pd.cantidad_casa                                 AS "Cantidad Casa",
+    pd.cantidad_local                                AS "Cantidad Local",
+    pd.precio_que_pagas                              AS "Precio que pagas"
+FROM pedido_detalle pd
+JOIN pedidos ped              ON ped.id = pd.pedido_id
+JOIN productos pr             ON pr.codigo_articulo = pd.codigo_articulo
+LEFT JOIN asociados a         ON a.id = pd.asociado_id
+LEFT JOIN semanas_catalogo sc ON sc.id = ped.semana_id
+ORDER BY ped.fecha_registro DESC, ped.folio_pedido, pd.id
 """
 
 
@@ -245,3 +277,37 @@ def confirmar_carga(
         "detalle": detalle,
         "folios": list(grupos),
     }
+
+
+def obtener_movimientos(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """Devuelve el historial de lineas de pedido para la GUI (R1..R4).
+
+    Sustituye a la version que leia el maestro de Excel
+    (`cargar_existente(...).to_dict("records")`): una sola consulta con los
+    JOIN necesarios, sin anti-patron N+1. Las claves de cada dict son las mismas
+    que consumia el Treeview, asi que el filtrado client-side de la pestana no
+    cambia (R1, R2).
+
+    El nombre del asociado se resuelve por join contra `asociados` y degrada al
+    nombre impreso en el PDF cuando la linea no tiene `asociado_id` (R3); la
+    semana llega por LEFT JOIN y queda en `""` mientras BW-01 no la vincule.
+    Una base sin movimientos devuelve `[]`, nunca `None` (R4).
+
+    Args:
+        conn: conexion inyectada por el call-site (ADR-2), con
+            `row_factory = sqlite3.Row` tal y como la entrega `db.get_conn`.
+
+    Returns:
+        Lista de dicts con las diez claves del Treeview, ordenada por fecha de
+        registro descendente y, dentro de cada folio, por orden de captura.
+
+    Raises:
+        CoreError: si SQLite rechaza la lectura.
+
+    Time: O(n log n) por el ORDER BY | Space: O(n)
+    """
+    try:
+        filas = conn.execute(SELECT_MOVIMIENTOS_SQL).fetchall()
+    except sqlite3.Error as exc:
+        raise CoreError(f"No se pudo leer el historial de pedidos: {exc}") from exc
+    return [dict(fila) for fila in filas]

@@ -420,8 +420,16 @@ def _bloques_try(nodo: ast.AST, prefijo: str = "") -> Iterator[tuple[str, ast.Tr
         yield from _bloques_try(hijo, prefijo)
 
 
+#: Modulos que constituyen la capa de dominio desde la GUI. `pdf_extractor` se
+#: sumo a `core` cuando la carga de remisiones paso a llamarlo directamente: el
+#: parseo de un PDF es una operacion de dominio con las mismas exigencias de R4
+#: (bitacora + aviso a la usuaria), y dejarlo fuera del detector habria hecho
+#: que esa ruta de fallo saliera del radar sin que nadie la retirara a proposito.
+MODULOS_DOMINIO: Final[frozenset[str]] = frozenset({"core", "pdf_extractor"})
+
+
 def _invoca_al_dominio(bloque: ast.Try) -> bool:
-    """Indica si el cuerpo protegido llama a la capa de dominio (`core.*`).
+    """Indica si el cuerpo protegido llama a la capa de dominio.
 
     Time: O(n) sobre los nodos del bloque | Space: O(1)
     """
@@ -429,7 +437,7 @@ def _invoca_al_dominio(bloque: ast.Try) -> bool:
         isinstance(nodo, ast.Call)
         and isinstance(nodo.func, ast.Attribute)
         and isinstance(nodo.func.value, ast.Name)
-        and nodo.func.value.id == "core"
+        and nodo.func.value.id in MODULOS_DOMINIO
         for sentencia in bloque.body
         for nodo in ast.walk(sentencia)
     )

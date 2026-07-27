@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 
 import core
+import core_pedidos
 import db
 
 TIPO_NORMAL: str = "Normal (con descuento)"
@@ -575,3 +576,199 @@ def test_detalle_ocurrencia_ausente_cae_en_uno(conn: sqlite3.Connection) -> None
 
     linea = conn.execute("SELECT ocurrencia FROM pedido_detalle").fetchone()
     assert linea["ocurrencia"] == 1
+
+
+# --------------------------------------------------------------------------
+# MERC-06 / R1-R4 - historial de movimientos para la pestana de pedidos
+# --------------------------------------------------------------------------
+#: Claves que el Treeview de `TabPedidos` ya consumia del maestro de Excel. El
+#: contrato es exacto: cualquier alta o baja rompe `_aplicar_filtro`.
+CLAVES_GUI: frozenset[str] = frozenset(
+    {
+        "Semana",
+        "Folio de pedido",
+        "Codigo articulo",
+        "Descripcion",
+        "Nombre asociado",
+        "Cantidad surtida",
+        "Cantidad Asociado",
+        "Cantidad Casa",
+        "Cantidad Local",
+        "Precio que pagas",
+    }
+)
+
+
+def vincular_semana(
+    conn: sqlite3.Connection, folio: str, semana_texto: str
+) -> None:
+    """Ata un folio ya cargado a una semana del catalogo (lo hara BW-01)."""
+    conn.execute(
+        "INSERT INTO semanas_catalogo (semana_texto) VALUES (?)", (semana_texto,)
+    )
+    conn.execute(
+        "UPDATE pedidos SET semana_id = "
+        "(SELECT id FROM semanas_catalogo WHERE semana_texto = ?) "
+        "WHERE folio_pedido = ?",
+        (semana_texto, folio),
+    )
+
+
+def fechar_pedido(conn: sqlite3.Connection, folio: str, fecha: str) -> None:
+    """Fija `fecha_registro` de un folio para poder afirmar el orden."""
+    conn.execute(
+        "UPDATE pedidos SET fecha_registro = ? WHERE folio_pedido = ?",
+        (fecha, folio),
+    )
+
+
+def test_obtener_movimientos_devuelve_claves_gui(conn: sqlite3.Connection) -> None:
+    """R1, R2: cada linea llega con las claves y valores que espera el Treeview."""
+    fila = fila_pdf(
+        codigo="11111",
+        descripcion="Sarten antiadherente 24cm",
+        surtida=3,
+        asociado=1,
+        casa=2,
+        local=0,
+        precio_pagas=199.0,
+    )
+    core.confirmar_carga(conn, [fila])
+    vincular_semana(conn, FOLIO_A, "27 - 2026")
+
+    movimientos = core_pedidos.obtener_movimientos(conn)
+
+    assert len(movimientos) == 1
+    assert set(movimientos[0]) == CLAVES_GUI
+    assert movimientos[0] == {
+        "Semana": "27 - 2026",
+        "Folio de pedido": FOLIO_A,
+        "Codigo articulo": "11111",
+        "Descripcion": "Sarten antiadherente 24cm",
+        "Nombre asociado": "ETNAN GAMALIEL PEREZ",
+        "Cantidad surtida": 3,
+        "Cantidad Asociado": 1,
+        "Cantidad Casa": 2,
+        "Cantidad Local": 0,
+        "Precio que pagas": 199.0,
+    }
+
+
+def test_obtener_movimientos_asociado_por_join_y_db_vacia(
+    conn: sqlite3.Connection,
+) -> None:
+    """R3, R4: el nombre sale del join con `asociados`; sin datos devuelve `[]`.
+
+    El nombre del PDF llega con espacios internos duplicados y el de `asociados`
+    normalizado, asi que la sola forma del texto ya prueba de que tabla salio.
+    """
+    assert core_pedidos.obtener_movimientos(conn) == []
+
+    core.confirmar_carga(conn, [fila_pdf(nombre_asociado="  ETNAN   GAMALIEL  ")])
+
+    movimientos = core_pedidos.obtener_movimientos(conn)
+
+    assert [fila["Nombre asociado"] for fila in movimientos] == ["ETNAN GAMALIEL"]
+    cabecera = conn.execute("SELECT nombre_asociado_pdf FROM pedidos").fetchone()
+    assert cabecera["nombre_asociado_pdf"] == "ETNAN   GAMALIEL"
+
+
+def test_obtener_movimientos_sin_asociado_id_degrada_al_nombre_del_pdf(
+    conn: sqlite3.Connection,
+) -> None:
+    """R3: el historial anterior a MERC-02 (`asociado_id` NULL) no pierde nombre."""
+    core.confirmar_carga(conn, [fila_pdf(nombre_asociado="AURA JANNET")])
+    conn.execute("UPDATE pedido_detalle SET asociado_id = NULL")
+
+    movimientos = core_pedidos.obtener_movimientos(conn)
+
+    assert movimientos[0]["Nombre asociado"] == "AURA JANNET"
+
+
+def test_obtener_movimientos_sin_nombre_en_ninguna_fuente_devuelve_cadena_vacia(
+    conn: sqlite3.Connection,
+) -> None:
+    """R3: sin asociado ni nombre en el PDF la celda es `""`, nunca `None`."""
+    core.confirmar_carga(conn, [fila_pdf(nombre_asociado="")])
+
+    movimientos = core_pedidos.obtener_movimientos(conn)
+
+    assert movimientos[0]["Nombre asociado"] == ""
+
+
+def test_obtener_movimientos_sin_semana_vinculada_devuelve_cadena_vacia(
+    conn: sqlite3.Connection,
+) -> None:
+    """R3: `semana_id` es nullable hasta BW-01; el LEFT JOIN no descarta la fila."""
+    core.confirmar_carga(conn, [fila_pdf()])
+
+    movimientos = core_pedidos.obtener_movimientos(conn)
+
+    assert len(movimientos) == 1
+    assert movimientos[0]["Semana"] == ""
+
+
+def test_obtener_movimientos_devuelve_una_fila_por_linea_de_detalle(
+    conn: sqlite3.Connection,
+) -> None:
+    """R1: la consulta es por linea de detalle, no por cabecera de pedido."""
+    filas = [
+        fila_pdf(codigo="11111"),
+        fila_pdf(codigo="22222", descripcion="Vaso termico"),
+    ]
+    core.confirmar_carga(conn, filas)
+
+    movimientos = core_pedidos.obtener_movimientos(conn)
+
+    assert [fila["Codigo articulo"] for fila in movimientos] == ["11111", "22222"]
+    assert [fila["Descripcion"] for fila in movimientos] == [
+        "Sarten antiadherente 24cm",
+        "Vaso termico",
+    ]
+
+
+def test_obtener_movimientos_ordena_por_fecha_de_registro_descendente(
+    conn: sqlite3.Connection,
+) -> None:
+    """R1: lo mas reciente encabeza la tabla, como hacia el maestro de Excel."""
+    core.confirmar_carga(conn, [fila_pdf(folio=FOLIO_A, codigo="11111")])
+    core.confirmar_carga(
+        conn, [fila_pdf(folio=FOLIO_B, codigo="22222", descripcion="Vaso")]
+    )
+    fechar_pedido(conn, FOLIO_A, "2026-07-20 08:00")
+    fechar_pedido(conn, FOLIO_B, "2026-07-24 08:00")
+
+    movimientos = core_pedidos.obtener_movimientos(conn)
+
+    assert [fila["Folio de pedido"] for fila in movimientos] == [FOLIO_B, FOLIO_A]
+
+
+def test_obtener_movimientos_no_pierde_lineas_de_productos_de_regalo(
+    conn: sqlite3.Connection,
+) -> None:
+    """El INNER JOIN a `productos` es seguro: la FK RESTRICT garantiza el match."""
+    filas = [
+        fila_pdf(codigo="11111"),
+        fila_pdf(
+            codigo="33333",
+            descripcion="Regalo por compra",
+            precio_pagas=0.0,
+            valor_total=0.0,
+        ),
+    ]
+    core.confirmar_carga(conn, filas)
+
+    movimientos = core_pedidos.obtener_movimientos(conn)
+
+    assert len(movimientos) == 2
+    assert movimientos[1]["Precio que pagas"] == 0.0
+
+
+def test_obtener_movimientos_envuelve_el_error_de_sqlite_en_core_error(
+    conn: sqlite3.Connection,
+) -> None:
+    """El error de bajo nivel se traduce en el borde, no se filtra a la GUI."""
+    conn.execute("DROP TABLE pedido_detalle")
+
+    with pytest.raises(core.CoreError):
+        core_pedidos.obtener_movimientos(conn)

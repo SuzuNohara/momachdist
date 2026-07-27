@@ -19,7 +19,18 @@ core.py                  <- fachada: reexporta todo (este archivo)
   |     +-- core_asociados.py  <- directorio de asociados (FK del detalle)
   |           |
   |           +-- core_comun.py <- CoreError + coercion de valores
+  |
+  +-- core_clientes.py   <- directorio de clientes finales (hoja del grafo)
+        |
+        +-- core_comun.py
 ```
+
+**Transacciones:** toda funcion de escritura de la capa core delimita su propia
+transaccion con `with conn:` (commit al salir, rollback ante excepcion) salvo las
+que documentan explicitamente lo contrario porque un orquestador las gobierna
+(`obtener_o_crear_asociado`, `guardar_pedido`, `guardar_pedido_detalle`, que
+corren dentro del `with conn:` de `confirmar_carga`). No se usa `conn.commit()`
+suelto: deja la transaccion implicita abierta ante un fallo posterior.
 
 Las dependencias apuntan siempre hacia abajo: `core_comun` no importa a nadie y
 ningun submodulo importa `core`, asi que no hay ciclos.
@@ -36,12 +47,26 @@ Entrada de mercancia (`core_pedidos`):
 * `guardar_pedido`          -- cabecera idempotente por folio.
 * `guardar_pedido_detalle`  -- lineas del pedido, sin duplicar.
 * `confirmar_carga`         -- orquestador transaccional del lote completo.
+* `obtener_movimientos`     -- historial de lineas de pedido, con JOINs resueltos.
 * `CargaError`              -- error de dominio de la carga de remisiones.
 
 Directorio de asociados (`core_asociados`):
 
 * `obtener_o_crear_asociado` -- resuelve (o da de alta) el asociado de una nota.
 * `_normalizar_nombre`       -- recorte + colapso de espacios del nombre.
+* `listar_asociados`         -- directorio completo con saldo individual (ADR-3).
+* `crear_asociado`           -- alta manual desde el directorio.
+* `editar_asociado`          -- actualizacion parcial de campos.
+* `eliminar_asociado`        -- baja protegida por las FKs de entregas/detalle.
+* `AsociadoError`            -- error de dominio del directorio de asociados.
+
+Directorio de clientes (`core_clientes`):
+
+* `listar_clientes`  -- CRM de compradores finales, ordenado por nombre.
+* `crear_cliente` / `editar_cliente` / `eliminar_cliente` -- CRUD; la baja esta
+  protegida por las FKs de `ventas` y `encargos`.
+* `CAMPOS_CLIENTE`   -- contrato de claves que consume la GUI.
+* `ClienteError`     -- error de dominio del directorio de clientes.
 
 Reparto de la carga (`core_reparto`):
 
@@ -68,8 +93,21 @@ from core_asociados import (
     CLAVE_NOMBRE_ASOCIADO,
     INSERT_ASOCIADO_SQL,
     SELECT_ASOCIADO_ID_SQL,
+    AsociadoError,
     _normalizar_nombre,
+    crear_asociado,
+    editar_asociado,
+    eliminar_asociado,
+    listar_asociados,
     obtener_o_crear_asociado,
+)
+from core_clientes import (
+    CAMPOS_CLIENTE,
+    ClienteError,
+    crear_cliente,
+    editar_cliente,
+    eliminar_cliente,
+    listar_clientes,
 )
 from core_comun import CoreError, _entero, _es_cero, _real, _texto
 from core_entregas import EntregaError, generar_entregas
@@ -91,6 +129,7 @@ from core_pedidos import (
     confirmar_carga,
     guardar_pedido,
     guardar_pedido_detalle,
+    obtener_movimientos,
 )
 from core_productos import (
     CLAVE_CODIGO,
@@ -123,7 +162,18 @@ from core_reparto import (
     normalizar_reparto_carga,
 )
 
+from core_ventas import (
+    CAMPOS_HISTORIAL,
+    CLIENTE_MOSTRADOR,
+    VentaError,
+    obtener_ventas_historial,
+    registrar_venta,
+)
+
 __all__ = [
+    "CAMPOS_CLIENTE",
+    "CAMPOS_HISTORIAL",
+    "CLIENTE_MOSTRADOR",
     "CLAVE_ASOCIADO_ID",
     "CLAVE_CANTIDAD_ASOCIADO",
     "CLAVE_CANTIDAD_CASA",
@@ -145,21 +195,35 @@ __all__ = [
     "SELECT_PEDIDO_ID_SQL",
     "STOCK_BAJO_UMBRAL",
     "UPSERT_PRODUCTO_SQL",
+    "AsociadoError",
     "CargaError",
+    "ClienteError",
     "CoreError",
     "EntregaError",
+    "VentaError",
     "aplicar_default_post_extraccion",
     "aplicar_reparto_default_asociado",
     "confirmar_carga",
+    "crear_asociado",
+    "crear_cliente",
+    "editar_asociado",
+    "editar_cliente",
+    "eliminar_asociado",
+    "eliminar_cliente",
     "estampar_asociado_id",
     "generar_entregas",
     "guardar_pedido",
     "guardar_pedido_detalle",
+    "listar_asociados",
+    "listar_clientes",
     "normalizar_reparto_carga",
     "obtener_catalogo",
     "obtener_existencias",
+    "obtener_movimientos",
     "obtener_o_crear_asociado",
     "obtener_resumen_dashboard",
+    "obtener_ventas_historial",
+    "registrar_venta",
     "upsert_producto",
     "upsert_productos",
 ]

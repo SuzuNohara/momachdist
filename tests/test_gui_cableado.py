@@ -67,3 +67,63 @@ def test_confirmar_carga_usa_la_firma_nueva() -> None:
     fuente = ast.unparse(_metodo("App", "al_confirmar_carga"))
     assert "core.confirmar_carga(self.conn, filas_confirmadas)" in fuente
     assert "EXCEL_PATH" not in fuente
+
+
+#: Nombres que la GUI todavia invoca como `core.X` y que la fachada aun no
+#: expone, porque su migracion Excel->SQLite pertenece a una oleada posterior:
+#: la pestana Entregas depende de CLI-04. Es deuda declarada, no un descuido.
+#: **Esta lista solo puede encoger.** Si un nombre nuevo aparece en el fallo de
+#: `test_gui_no_referencia_core_inexistente`, es un bug real: la GUI quedo
+#: llamando a algo que la capa core no ofrece, y el guard
+#: `os.path.exists(EXCEL_PATH)` lo enmascara hasta que la usuaria abre esa
+#: pestana en una instalacion sin xlsx.
+PENDIENTES_CLI04: Final[frozenset[str]] = frozenset(
+    {
+        "FORMA_PAGO_OPCIONES",
+        "STATUS_ASOCIADO_OPCIONES",
+        "actualizar_entrega_asociado",
+        "obtener_entregas_asociado",
+    }
+)
+
+
+def _atributos_core_usados() -> set[str]:
+    """Nombres accedidos como `core.<attr>` en `gui_inventario.py`."""
+    arbol = ast.parse(GUI_PATH.read_text(encoding="utf-8"))
+    return {
+        nodo.attr
+        for nodo in ast.walk(arbol)
+        if isinstance(nodo, ast.Attribute)
+        and isinstance(nodo.value, ast.Name)
+        and nodo.value.id == "core"
+    }
+
+
+def test_gui_no_referencia_core_inexistente() -> None:
+    """Todo `core.X` que la GUI invoca existe en la fachada.
+
+    Guard sistematico de una clase de fallo que ya se materializo tres veces
+    (`confirmar_carga` con la firma vieja, `link_whatsapp` y
+    `preparar_filas_desde_pdfs`): la GUI llama a un nombre que la capa core no
+    expone, y nadie se entera porque la suite la verifica por AST sin
+    importarla y el guard de Excel corta antes en tiempo de ejecucion.
+    """
+    # Act
+    faltantes = {a for a in _atributos_core_usados() if not hasattr(core, a)}
+
+    # Assert
+    assert faltantes <= PENDIENTES_CLI04, (
+        f"La GUI llama a core.{sorted(faltantes - PENDIENTES_CLI04)}, "
+        "que la fachada no expone."
+    )
+
+
+def test_lista_de_pendientes_no_tiene_entradas_muertas() -> None:
+    """Un pendiente ya resuelto debe salir de la lista, no quedarse."""
+    # Act
+    resueltos = {a for a in PENDIENTES_CLI04 if hasattr(core, a)}
+
+    # Assert
+    assert not resueltos, (
+        f"Ya existen en core y sobran en PENDIENTES_CLI04: {sorted(resueltos)}"
+    )
