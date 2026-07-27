@@ -26,7 +26,8 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
 import backup
-import inventario_core as core
+import core
+import db
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,10 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         backup.startup(DB_PATH, LOG_PATH)
+        # Conexion unica de la sesion, inyectada en cada llamada a `core`
+        # (ADR-2: la capa core nunca abre conexiones por su cuenta). `init_db`
+        # es idempotente, asi que sirve de arranque y de migracion en un paso.
+        self.conn = db.init_db(DB_PATH)
         self.title(APP_TITLE)
         self.geometry("1150x720")
         self.configure(bg="#FFFFFF")
@@ -169,7 +174,7 @@ class App(tk.Tk):
 
     def al_confirmar_carga(self, filas_confirmadas):
         try:
-            core.confirmar_carga(filas_confirmadas, EXCEL_PATH)
+            core.confirmar_carga(self.conn, filas_confirmadas)
         except Exception as e:
             logger.exception("Fallo el guardado de la carga confirmada")
             messagebox.showerror(APP_TITLE, f"Ocurrió un error al guardar:\n{e}")
@@ -257,14 +262,7 @@ class TabDashboard(ttk.Frame):
             self.labels_tarjetas[clave] = valor_label
 
     def refrescar(self):
-        if not os.path.exists(EXCEL_PATH):
-            resumen = {
-                "piezas_disponibles": 0, "valor_inventario_costo": 0, "num_ventas": 0,
-                "ganancia_total": 0, "num_pedidos_distintos": 0, "monto_pendiente_asociados": 0,
-                "productos_bajo_stock": [],
-            }
-        else:
-            resumen = core.obtener_resumen_dashboard(EXCEL_PATH)
+        resumen = core.obtener_resumen_dashboard(self.app.conn)
 
         for clave, label in self.labels_tarjetas.items():
             valor = resumen.get(clave, 0)
@@ -325,10 +323,7 @@ class TabInventario(ttk.Frame):
         scrollbar.pack(side="right", fill="y")
 
     def refrescar(self):
-        if not os.path.exists(EXCEL_PATH):
-            self.catalogo_completo = []
-        else:
-            self.catalogo_completo = core.obtener_catalogo(EXCEL_PATH)
+        self.catalogo_completo = core.obtener_existencias(self.app.conn)
         self._aplicar_filtro()
 
     def _aplicar_filtro(self):
@@ -868,7 +863,7 @@ class VentanaVenta(tk.Toplevel):
         self.resizable(False, False)
         self.configure(bg="#FFFFFF")
 
-        self.catalogo = core.obtener_catalogo(EXCEL_PATH)
+        self.catalogo = core.obtener_existencias(self.app.conn)
         self.producto_seleccionado = None
 
         self._construir_interfaz()
@@ -1033,7 +1028,7 @@ class VentanaVenta(tk.Toplevel):
 
         self.app.refrescar_todo()
 
-        self.catalogo = core.obtener_catalogo(EXCEL_PATH)
+        self.catalogo = core.obtener_existencias(self.app.conn)
         self.producto_seleccionado = None
         self.cantidad_var.set("")
         self.precio_var.set("")
@@ -1061,6 +1056,7 @@ class VentanaPrevisualizacion(tk.Toplevel):
         ("Codigo articulo", "Código", 65, False),
         ("Descripcion", "Descripción", 170, False),
         ("Tipo", "Tipo", 115, False),
+        ("Nombre asociado", "Asociado", 130, False),
         ("Cantidad surtida", "Cant. total", 65, True),
         ("Cantidad Asociado", "Asociado", 65, True),
         ("Cantidad Casa", "Casa", 55, True),
@@ -1073,7 +1069,11 @@ class VentanaPrevisualizacion(tk.Toplevel):
     def __init__(self, app, filas, errores):
         super().__init__(app)
         self.app = app
-        self.filas = [dict(f) for f in filas]  # copia editable
+        # Copia editable con el reparto ya normalizado: todo al asociado de la
+        # nota (lo normal), o todo a Casa y marcado para revision cuando la
+        # nota no trae asociado. La copia no filtra llaves: `asociado_id` y las
+        # marcas viajan intactas hasta `_confirmar`.
+        self.filas = core.normalizar_reparto_carga([dict(f) for f in filas])
         self.title("Vista previa antes de guardar")
         self.geometry("970x500")
         self.configure(bg="#FFFFFF")
@@ -1104,6 +1104,10 @@ class VentanaPrevisualizacion(tk.Toplevel):
         for col_id, titulo, ancho, _editable in self.COLUMNAS:
             self.tree.heading(col_id, text=titulo)
             self.tree.column(col_id, width=ancho, anchor="center" if col_id != "Descripcion" else "w")
+
+        # Filas cuya nota no trae asociado: se resaltan para que se revisen
+        # antes de confirmar (su cantidad quedo en Casa, no con el Asociado).
+        self.tree.tag_configure("revisar", background="#FFF7E6", foreground="#996600")
 
         scrollbar = ttk.Scrollbar(frame_tabla, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
@@ -1145,7 +1149,8 @@ class VentanaPrevisualizacion(tk.Toplevel):
         self.tree.delete(*self.tree.get_children())
         for i, fila in enumerate(self.filas):
             valores = [self._formatear_valor(col_id, fila.get(col_id, "")) for col_id, *_ in self.COLUMNAS]
-            self.tree.insert("", "end", iid=str(i), values=valores)
+            etiquetas = ("revisar",) if fila.get("_revisar_asociado") else ()
+            self.tree.insert("", "end", iid=str(i), values=valores, tags=etiquetas)
 
     def _editar_celda(self, event):
         region = self.tree.identify("region", event.x, event.y)

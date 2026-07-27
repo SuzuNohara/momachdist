@@ -1,238 +1,165 @@
-"""Capa de servicios de dominio (core).
+"""Capa de servicios de dominio (core) -- fachada de los submodulos por dominio.
 
-La GUI nunca ejecuta SQL: solo llama a las funciones de este modulo (ADR-2).
-Este modulo tampoco abre conexiones -- la `sqlite3.Connection` siempre viene
-inyectada desde el call-site (`db.get_conn`), lo que mantiene la capa testeable
-con una base en memoria.
+La GUI nunca ejecuta SQL: solo llama a las funciones de esta capa (ADR-2). La
+capa tampoco abre conexiones -- la `sqlite3.Connection` siempre viene inyectada
+desde el call-site (`db.get_conn`), lo que la mantiene testeable con una base
+en memoria.
 
-Primer corte: catalogo de productos.
+El codigo vivia en un unico `core.py` hasta que supero el limite de 400 lineas
+de `.langs/python.md`. Se dividio por dominio conservando `core` como fachada,
+de modo que `import core` sigue funcionando exactamente igual:
+
+```
+core.py                  <- fachada: reexporta todo (este archivo)
+  |
+  +-- core_pedidos.py    <- remisiones PDF -> pedidos + pedido_detalle
+  |     |
+  |     +-- core_productos.py  <- catalogo de productos (FK del detalle)
+  |     +-- core_reparto.py    <- reparto Asociado / Casa / Local
+  |     +-- core_asociados.py  <- directorio de asociados (FK del detalle)
+  |           |
+  |           +-- core_comun.py <- CoreError + coercion de valores
+```
+
+Las dependencias apuntan siempre hacia abajo: `core_comun` no importa a nadie y
+ningun submodulo importa `core`, asi que no hay ciclos.
+
+Catalogo de productos (`core_productos`):
 
 * `upsert_producto`   -- alta/actualizacion idempotente de un producto.
 * `upsert_productos`  -- lote deduplicado y atomico; devuelve codigos distintos.
 * `obtener_catalogo`  -- lectura del catalogo ordenada por codigo.
-* `CoreError`         -- error de dominio base de la capa core.
+* `CoreError`         -- error de dominio base de la capa core (`core_comun`).
+
+Entrada de mercancia (`core_pedidos`):
+
+* `guardar_pedido`          -- cabecera idempotente por folio.
+* `guardar_pedido_detalle`  -- lineas del pedido, sin duplicar.
+* `confirmar_carga`         -- orquestador transaccional del lote completo.
+* `CargaError`              -- error de dominio de la carga de remisiones.
+
+Directorio de asociados (`core_asociados`):
+
+* `obtener_o_crear_asociado` -- resuelve (o da de alta) el asociado de una nota.
+* `_normalizar_nombre`       -- recorte + colapso de espacios del nombre.
+
+Reparto de la carga (`core_reparto`):
+
+* `aplicar_reparto_default_asociado` -- default de la fila al asociado.
+* `aplicar_default_post_extraccion`  -- inversion del default tras extraer.
+* `estampar_asociado_id`             -- sella el asociado resuelto en las filas.
+* `normalizar_reparto_carga`         -- default por fila, con fallback a Casa.
+
+Entregas a asociado (`core_entregas`):
+
+* `generar_entregas`  -- una entrega por linea con cantidad de asociado > 0.
+* `EntregaError`      -- error de dominio de la generacion de entregas.
+
+Existencias y dashboard (`core_existencias`):
+
+* `obtener_existencias`         -- stock calculado desde la vista `vw_existencias`.
+* `obtener_resumen_dashboard`   -- agregados del dashboard.
+* `STOCK_BAJO_UMBRAL`           -- umbral de alerta de stock bajo.
 """
 
 from __future__ import annotations
 
-import sqlite3
-from typing import Any, Final
-
-#: Claves tal como llegan del extractor de PDF (`pdf_extractor`), R4.
-CLAVE_CODIGO: Final[str] = "Codigo articulo"
-CLAVE_DESCRIPCION: Final[str] = "Descripcion"
-CLAVE_PRECIO_PAGAS: Final[str] = "Precio que pagas"
-CLAVE_VALOR_TOTAL: Final[str] = "Valor total con IVA"
-
-#: Upsert idempotente (R1, R2, R3, R5, R7).
-#:
-#: * El `DO UPDATE` no lista `fecha_creacion`, por lo que el valor original
-#:   sobrevive a cualquier reprocesamiento del mismo codigo (R2).
-#: * `MAX(...)` impide degradar un `es_regalo_o_promo` ya marcado en 1 (R5).
-#: * El `WHERE` convierte en no-op las cargas repetidas sin cambios (R3).
-UPSERT_PRODUCTO_SQL: Final[str] = """
-INSERT INTO productos (codigo_articulo, descripcion, es_regalo_o_promo)
-VALUES (?, ?, ?)
-ON CONFLICT(codigo_articulo) DO UPDATE SET
-    descripcion = excluded.descripcion,
-    es_regalo_o_promo = MAX(productos.es_regalo_o_promo,
-                            excluded.es_regalo_o_promo)
-WHERE productos.descripcion <> excluded.descripcion
-   OR productos.es_regalo_o_promo <> excluded.es_regalo_o_promo
-"""
-
-#: Lectura del catalogo completo (R6).
-SELECT_CATALOGO_SQL: Final[str] = """
-SELECT codigo_articulo, descripcion, categoria, es_regalo_o_promo, fecha_creacion
-FROM productos
-ORDER BY codigo_articulo
-"""
-
-_COLUMNAS_CATALOGO: Final[tuple[str, ...]] = (
-    "codigo_articulo",
-    "descripcion",
-    "categoria",
-    "es_regalo_o_promo",
-    "fecha_creacion",
+from core_asociados import (
+    CLAVE_NOMBRE_ASOCIADO,
+    INSERT_ASOCIADO_SQL,
+    SELECT_ASOCIADO_ID_SQL,
+    _normalizar_nombre,
+    obtener_o_crear_asociado,
+)
+from core_comun import CoreError, _entero, _es_cero, _real, _texto
+from core_entregas import EntregaError, generar_entregas
+from core_existencias import (
+    STOCK_BAJO_UMBRAL,
+    obtener_existencias,
+    obtener_resumen_dashboard,
+)
+from core_pedidos import (
+    CLAVE_FOLIO,
+    CONTAR_PEDIDOS_SQL,
+    INSERT_DETALLE_SQL,
+    INSERT_PEDIDO_SQL,
+    SELECT_PEDIDO_ID_SQL,
+    CargaError,
+    _agrupar_por_folio,
+    _contar_pedidos,
+    _parametros_detalle,
+    confirmar_carga,
+    guardar_pedido,
+    guardar_pedido_detalle,
+)
+from core_productos import (
+    CLAVE_CODIGO,
+    CLAVE_DESCRIPCION,
+    CLAVE_PRECIO_PAGAS,
+    CLAVE_VALOR_TOTAL,
+    SELECT_CATALOGO_SQL,
+    UPSERT_PRODUCTO_SQL,
+    _COLUMNAS_CATALOGO,
+    _aplicar_upsert_productos,
+    _ejecutar_upsert,
+    _fusionar,
+    _mapear_fila,
+    obtener_catalogo,
+    upsert_producto,
+    upsert_productos,
+)
+from core_reparto import (
+    CLAVE_ASOCIADO_ID,
+    CLAVE_CANTIDAD_ASOCIADO,
+    CLAVE_CANTIDAD_CASA,
+    CLAVE_CANTIDAD_LOCAL,
+    CLAVE_SURTIDA,
+    MARCA_REVISAR,
+    _aplicar_reparto_default_casa,
+    _tiene_asociado,
+    aplicar_default_post_extraccion,
+    aplicar_reparto_default_asociado,
+    estampar_asociado_id,
+    normalizar_reparto_carga,
 )
 
-
-class CoreError(Exception):
-    """Error base de dominio de la capa de servicios."""
-
-
-def _texto(valor: Any) -> str:
-    """Normaliza `valor` a texto sin espacios en los extremos (R4).
-
-    Time: O(n) sobre la longitud del texto | Space: O(n)
-    """
-    if valor is None:
-        return ""
-    return str(valor).strip()
-
-
-def _es_cero(valor: Any) -> bool:
-    """Indica si `valor` representa exactamente el numero cero.
-
-    Valores ausentes, booleanos o no numericos no cuentan como cero: solo un
-    0 real (entero, flotante o su texto) satisface la condicion de R5.
-
-    Time: O(1) | Space: O(1)
-    """
-    if valor is None or isinstance(valor, bool):
-        return False
-    if isinstance(valor, (int, float)):
-        return float(valor) == 0.0
-    try:
-        return float(str(valor).strip()) == 0.0
-    except ValueError:
-        return False
-
-
-def _mapear_fila(fila: dict[str, Any]) -> tuple[str, str, int]:
-    """Traduce una fila del PDF a las columnas de `productos` (R4, R5).
-
-    `categoria` queda fuera a proposito: no viene del PDF en este ciclo y debe
-    permanecer NULL. `es_regalo_o_promo` vale 1 unicamente cuando
-    `"Precio que pagas"` y `"Valor total con IVA"` son ambos 0 (R5); el precio
-    de catalogo no participa de la condicion.
-
-    Args:
-        fila: registro crudo del extractor de PDF.
-
-    Returns:
-        Tupla `(codigo_articulo, descripcion, es_regalo_o_promo)`.
-
-    Raises:
-        CoreError: si la fila no trae `codigo_articulo` o `descripcion`.
-
-    Time: O(n) sobre la longitud de los textos | Space: O(1)
-    """
-    codigo = _texto(fila.get(CLAVE_CODIGO))
-    descripcion = _texto(fila.get(CLAVE_DESCRIPCION))
-    if not codigo:
-        raise CoreError(f"Fila sin '{CLAVE_CODIGO}': {fila!r}")
-    if not descripcion:
-        raise CoreError(f"Fila sin '{CLAVE_DESCRIPCION}' para el codigo {codigo}")
-
-    es_regalo = int(
-        _es_cero(fila.get(CLAVE_PRECIO_PAGAS))
-        and _es_cero(fila.get(CLAVE_VALOR_TOTAL))
-    )
-    return codigo, descripcion, es_regalo
-
-
-def _ejecutar_upsert(
-    conn: sqlite3.Connection, parametros: tuple[str, str, int]
-) -> None:
-    """Aplica el upsert ya mapeado y traduce el error de sqlite3 a dominio.
-
-    Time: O(log m) sobre el indice de la PK | Space: O(1)
-    """
-    try:
-        conn.execute(UPSERT_PRODUCTO_SQL, parametros)
-    except sqlite3.Error as exc:
-        raise CoreError(
-            f"No se pudo guardar el producto {parametros[0]}: {exc}"
-        ) from exc
-
-
-def _fusionar(
-    previo: tuple[str, str, int] | None, actual: tuple[str, str, int]
-) -> tuple[str, str, int]:
-    """Combina dos apariciones del mismo codigo dentro de un lote (R5, R7).
-
-    La ultima descripcion gana (semantica de dedup del plan), pero el flag de
-    regalo/promocion es *pegajoso*: basta con que una sola aparicion del codigo
-    en el lote sea regalo para que `es_regalo_o_promo` quede en 1, sin importar
-    su posicion. Sin esta fusion la fila de regalo se perderia antes de llegar
-    al SQL cuando no es la ultima ocurrencia.
-
-    Time: O(1) | Space: O(1)
-    """
-    if previo is None:
-        return actual
-    codigo, descripcion, es_regalo = actual
-    return codigo, descripcion, max(es_regalo, previo[2])
-
-
-def upsert_producto(conn: sqlite3.Connection, fila: dict[str, Any]) -> None:
-    """Inserta o actualiza un producto a partir de una fila del PDF.
-
-    No abre ni cierra transacciones: la atomicidad del lote la gobierna
-    `upsert_productos`. Reejecutar con los mismos datos es un no-op (R3) y
-    `fecha_creacion` nunca se reescribe (R2).
-
-    Args:
-        conn: conexion inyectada por el call-site.
-        fila: registro crudo del extractor de PDF.
-
-    Raises:
-        CoreError: si la fila es invalida o si SQLite rechaza la escritura.
-
-    Time: O(log m) sobre el indice de la PK | Space: O(1)
-    """
-    _ejecutar_upsert(conn, _mapear_fila(fila))
-
-
-def upsert_productos(conn: sqlite3.Connection, filas: list[dict[str, Any]]) -> int:
-    """Procesa un lote de filas del PDF en una sola transaccion (R1, R2, R7).
-
-    Deduplica por `codigo_articulo` conservando la ultima descripcion, pero
-    fusionando `es_regalo_o_promo` con `max(...)` sobre todas las apariciones
-    del codigo: una fila de regalo en cualquier posicion del lote marca el flag
-    (R5, primera clausula). Aplica un upsert por codigo distinto dentro de
-    `with conn:`, de modo que un error a mitad del lote no deja filas parciales.
-
-    Args:
-        conn: conexion inyectada por el call-site.
-        filas: registros crudos del extractor de PDF.
-
-    Returns:
-        Numero de codigos distintos procesados.
-
-    Raises:
-        CoreError: si alguna fila es invalida o si SQLite rechaza la escritura.
-
-    Time: O(n) | Space: O(k) con k = codigos distintos
-    """
-    unicas: dict[str, tuple[str, str, int]] = {}
-    for fila in filas:
-        parametros = _mapear_fila(fila)
-        unicas[parametros[0]] = _fusionar(unicas.get(parametros[0]), parametros)
-
-    if not unicas:
-        return 0
-
-    try:
-        with conn:
-            for parametros in unicas.values():
-                _ejecutar_upsert(conn, parametros)
-    except sqlite3.Error as exc:
-        raise CoreError(f"Fallo el guardado del lote de productos: {exc}") from exc
-    return len(unicas)
-
-
-def obtener_catalogo(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    """Devuelve el catalogo completo ordenado por `codigo_articulo` (R6).
-
-    Reemplaza a la version homonima de `inventario_core.py`, que leia el Excel:
-    se reescribe la persistencia, no el parsing (ADR-4).
-
-    Args:
-        conn: conexion inyectada por el call-site.
-
-    Returns:
-        Lista de dicts con las cinco columnas de `productos`; `[]` si no hay
-        productos registrados.
-
-    Raises:
-        CoreError: si SQLite rechaza la lectura.
-
-    Time: O(m) | Space: O(m)
-    """
-    try:
-        filas = conn.execute(SELECT_CATALOGO_SQL).fetchall()
-    except sqlite3.Error as exc:
-        raise CoreError(f"No se pudo leer el catalogo de productos: {exc}") from exc
-    return [{col: fila[col] for col in _COLUMNAS_CATALOGO} for fila in filas]
+__all__ = [
+    "CLAVE_ASOCIADO_ID",
+    "CLAVE_CANTIDAD_ASOCIADO",
+    "CLAVE_CANTIDAD_CASA",
+    "CLAVE_CANTIDAD_LOCAL",
+    "CLAVE_CODIGO",
+    "CLAVE_DESCRIPCION",
+    "CLAVE_FOLIO",
+    "CLAVE_NOMBRE_ASOCIADO",
+    "CLAVE_PRECIO_PAGAS",
+    "CLAVE_SURTIDA",
+    "CLAVE_VALOR_TOTAL",
+    "CONTAR_PEDIDOS_SQL",
+    "INSERT_ASOCIADO_SQL",
+    "INSERT_DETALLE_SQL",
+    "INSERT_PEDIDO_SQL",
+    "MARCA_REVISAR",
+    "SELECT_ASOCIADO_ID_SQL",
+    "SELECT_CATALOGO_SQL",
+    "SELECT_PEDIDO_ID_SQL",
+    "STOCK_BAJO_UMBRAL",
+    "UPSERT_PRODUCTO_SQL",
+    "CargaError",
+    "CoreError",
+    "EntregaError",
+    "aplicar_default_post_extraccion",
+    "aplicar_reparto_default_asociado",
+    "confirmar_carga",
+    "estampar_asociado_id",
+    "generar_entregas",
+    "guardar_pedido",
+    "guardar_pedido_detalle",
+    "normalizar_reparto_carga",
+    "obtener_catalogo",
+    "obtener_existencias",
+    "obtener_o_crear_asociado",
+    "obtener_resumen_dashboard",
+    "upsert_producto",
+    "upsert_productos",
+]
