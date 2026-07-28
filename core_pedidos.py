@@ -26,16 +26,18 @@ from core_productos import (
     _aplicar_upsert_productos,
 )
 from core_reparto import estampar_asociado_id
+from core_semanas import CLAVE_SEMANA, obtener_o_crear_semana
 
 CLAVE_FOLIO: Final[str] = "Folio de pedido"
 
-#: Cabecera del pedido (R1, R5, R8). `semana_id` queda NULL a proposito: la
-#: vinculacion con `semanas_catalogo` es responsabilidad de BW-01. El
-#: `DO NOTHING` sobre `UNIQUE(folio_pedido)` hace la insercion idempotente.
+#: Cabecera del pedido (R1, R5, R8). `semana_id` llega ya resuelto por
+#: `obtener_o_crear_semana` (BW-01 R5, que reemplaza al NULL fijo de MERC-01 R8)
+#: y sigue siendo nullable cuando la nota no trae semana. El `DO NOTHING` sobre
+#: `UNIQUE(folio_pedido)` hace la insercion idempotente.
 INSERT_PEDIDO_SQL: Final[str] = """
 INSERT INTO pedidos (folio_pedido, semana_id, codigo_nota, distribuidora,
                      nombre_asociado_pdf, archivo_origen)
-VALUES (?, NULL, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT(folio_pedido) DO NOTHING
 """
 
@@ -127,8 +129,13 @@ def guardar_pedido(conn: sqlite3.Connection, meta: dict[str, Any]) -> int:
     """Inserta (o recupera) la cabecera del pedido y devuelve su id (R1, R5, R8).
 
     Idempotente sobre `UNIQUE(folio_pedido)`: un folio ya presente no genera una
-    segunda fila y se devuelve el id existente. `semana_id` queda NULL. No abre
-    transaccion: la gobierna `confirmar_carga`.
+    segunda fila y se devuelve el id existente. No abre transaccion: la gobierna
+    `confirmar_carga`.
+
+    `semana_id` se resuelve contra `semanas_catalogo` con
+    `obtener_o_crear_semana` (BW-01 R5, que reemplaza al NULL fijo de MERC-01
+    R8) y solo queda NULL cuando la nota no trae semana. Esa resolucion tampoco
+    hace commit, asi que participa de la transaccion del orquestador.
 
     Args:
         conn: conexion inyectada por el call-site.
@@ -139,16 +146,21 @@ def guardar_pedido(conn: sqlite3.Connection, meta: dict[str, Any]) -> int:
 
     Raises:
         CargaError: si `meta` no trae folio o si el id no se puede recuperar.
+        sqlite3.Error: si SQLite rechaza el upsert de la semana; lo envuelve
+            `confirmar_carga` en el borde de la transaccion (R7).
 
-    Time: O(log m) sobre el indice de `folio_pedido` | Space: O(1)
+    Time: O(log m) sobre los indices de `folio_pedido` y `semana_texto`
+    | Space: O(1)
     """
     folio = _texto(meta.get(CLAVE_FOLIO))
     if not folio:
         raise CargaError(f"Cabecera sin '{CLAVE_FOLIO}': {meta!r}")
+    semana_id = obtener_o_crear_semana(conn, meta.get(CLAVE_SEMANA))
     conn.execute(
         INSERT_PEDIDO_SQL,
         (
             folio,
+            semana_id,
             _texto(meta.get("Codigo nota")),
             _texto(meta.get("Distribuidora")),
             _texto(meta.get(CLAVE_NOMBRE_ASOCIADO)),
@@ -290,7 +302,8 @@ def obtener_movimientos(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
     El nombre del asociado se resuelve por join contra `asociados` y degrada al
     nombre impreso en el PDF cuando la linea no tiene `asociado_id` (R3); la
-    semana llega por LEFT JOIN y queda en `""` mientras BW-01 no la vincule.
+    semana llega por LEFT JOIN desde `semanas_catalogo` (BW-01 la vincula en
+    `guardar_pedido`) y degrada a `""` cuando la nota no traia semana legible.
     Una base sin movimientos devuelve `[]`, nunca `None` (R4).
 
     Args:

@@ -20,7 +20,12 @@ core.py                  <- fachada: reexporta todo (este archivo)
   |           |
   |           +-- core_comun.py <- CoreError + coercion de valores
   |
+  |     +-- core_semanas.py    <- semanas de catalogo + puntos Betterware
+  |
   +-- core_clientes.py   <- directorio de clientes finales (hoja del grafo)
+  +-- core_ventas.py     <- ventas multi-producto e historial
+  +-- core_entregas.py   <- entregas a asociado + ciclo de status
+  +-- core_pagos.py      <- componente de pagos agnostico de tabla (ADR-6)
         |
         +-- core_comun.py
 ```
@@ -28,9 +33,18 @@ core.py                  <- fachada: reexporta todo (este archivo)
 **Transacciones:** toda funcion de escritura de la capa core delimita su propia
 transaccion con `with conn:` (commit al salir, rollback ante excepcion) salvo las
 que documentan explicitamente lo contrario porque un orquestador las gobierna
-(`obtener_o_crear_asociado`, `guardar_pedido`, `guardar_pedido_detalle`, que
-corren dentro del `with conn:` de `confirmar_carga`). No se usa `conn.commit()`
-suelto: deja la transaccion implicita abierta ante un fallo posterior.
+(`obtener_o_crear_asociado`, `obtener_o_crear_semana`, `guardar_pedido`,
+`guardar_pedido_detalle`, que corren dentro del `with conn:` de
+`confirmar_carga`). No se usa `conn.commit()` suelto: deja la transaccion
+implicita abierta ante un fallo posterior.
+
+> **Limitacion conocida (spike ENC-01, hallazgo H1).** `registrar_venta` y
+> `agregar_pago` abren y **cierran** su propia transaccion, asi que no se pueden
+> componer dentro de una transaccion mayor: quien los llame y falle despues se
+> queda con un commit parcial. ENC-03 (conversion encargo->venta) necesita
+> insertar la venta y traspasar los anticipos en una sola transaccion, de modo
+> que antes de escribirla hay que extraer variantes sin `with conn:` propio y
+> dejar que el llamador gobierne el limite. Ver `spikes/FINDINGS_encargo_venta.md`.
 
 Las dependencias apuntan siempre hacia abajo: `core_comun` no importa a nadie y
 ningun submodulo importa `core`, asi que no hay ciclos.
@@ -110,7 +124,15 @@ from core_clientes import (
     listar_clientes,
 )
 from core_comun import CoreError, _entero, _es_cero, _real, _texto
-from core_entregas import EntregaError, generar_entregas
+from core_entregas import (
+    CAMPOS_ENTREGA,
+    ENTREGA_STATUS_VALIDOS,
+    EntregaError,
+    StatusEntregaInvalidoError,
+    actualizar_status_entrega,
+    generar_entregas,
+    listar_entregas,
+)
 from core_existencias import (
     STOCK_BAJO_UMBRAL,
     obtener_existencias,
@@ -147,6 +169,19 @@ from core_productos import (
     upsert_producto,
     upsert_productos,
 )
+from core_pagos import (
+    CAMPOS_PAGO,
+    FORMAS_PAGO_VALIDAS,
+    PAGO_TABLAS,
+    FormaPagoInvalidaError,
+    MontoInvalidoError,
+    PagoError,
+    TablaPagoInvalidaError,
+    agregar_pago,
+    listar_pagos,
+    saldo_pendiente,
+    total_pagado,
+)
 from core_reparto import (
     CLAVE_ASOCIADO_ID,
     CLAVE_CANTIDAD_ASOCIADO,
@@ -170,8 +205,25 @@ from core_ventas import (
     registrar_venta,
 )
 
+from core_semanas import (
+    CAMPOS_SEMANA,
+    CLAVE_SEMANA,
+    _parsear_semana,
+    actualizar_puntos_semana,
+    listar_semanas,
+    obtener_o_crear_semana,
+    procesar_puntos_bw,
+)
+
+
 __all__ = [
     "CAMPOS_CLIENTE",
+    "CAMPOS_ENTREGA",
+    "CAMPOS_PAGO",
+    "CAMPOS_SEMANA",
+    "CLAVE_SEMANA",
+    "FORMAS_PAGO_VALIDAS",
+    "PAGO_TABLAS",
     "CAMPOS_HISTORIAL",
     "CLIENTE_MOSTRADOR",
     "CLAVE_ASOCIADO_ID",
@@ -186,6 +238,7 @@ __all__ = [
     "CLAVE_SURTIDA",
     "CLAVE_VALOR_TOTAL",
     "CONTAR_PEDIDOS_SQL",
+    "ENTREGA_STATUS_VALIDOS",
     "INSERT_ASOCIADO_SQL",
     "INSERT_DETALLE_SQL",
     "INSERT_PEDIDO_SQL",
@@ -200,7 +253,15 @@ __all__ = [
     "ClienteError",
     "CoreError",
     "EntregaError",
+    "StatusEntregaInvalidoError",
+    "FormaPagoInvalidaError",
+    "MontoInvalidoError",
+    "PagoError",
+    "TablaPagoInvalidaError",
     "VentaError",
+    "actualizar_puntos_semana",
+    "actualizar_status_entrega",
+    "agregar_pago",
     "aplicar_default_post_extraccion",
     "aplicar_reparto_default_asociado",
     "confirmar_carga",
@@ -215,15 +276,22 @@ __all__ = [
     "guardar_pedido",
     "guardar_pedido_detalle",
     "listar_asociados",
+    "listar_entregas",
+    "listar_pagos",
+    "listar_semanas",
     "listar_clientes",
     "normalizar_reparto_carga",
     "obtener_catalogo",
     "obtener_existencias",
     "obtener_movimientos",
     "obtener_o_crear_asociado",
+    "obtener_o_crear_semana",
+    "procesar_puntos_bw",
     "obtener_resumen_dashboard",
     "obtener_ventas_historial",
     "registrar_venta",
+    "saldo_pendiente",
+    "total_pagado",
     "upsert_producto",
     "upsert_productos",
 ]

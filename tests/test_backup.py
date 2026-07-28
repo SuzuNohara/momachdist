@@ -459,7 +459,13 @@ FUNCIONES_R4_CONOCIDAS: Final[frozenset[str]] = frozenset(
         "App.abrir_flujo_carga_pdf",
         "App.al_confirmar_carga",
         "VentanaAsociadoForm._guardar",
-        "VentanaDetalleEntrega._guardar",
+        # `VentanaDetalleEntrega._guardar` vivio aqui hasta CLI-04. Ese dialogo
+        # escribia la entrega en el Excel y salio del arbol al migrar la pestana
+        # de Entregas a SQLite; su ruta de fallo la heredan `VentanaPagos._agregar`
+        # (el registro del abono) y `TabEntregas._aplicar_status` (el ciclo de
+        # estado), que son las dos mitades en que se partio.
+        "VentanaPagos._agregar",
+        "TabEntregas._aplicar_status",
         "VentanaVenta._registrar",
     }
 )

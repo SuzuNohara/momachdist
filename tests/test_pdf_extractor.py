@@ -42,6 +42,18 @@ MOVED_FUNCTIONS: Final[tuple[str, ...]] = (
     "link_whatsapp",
 )
 
+#: Funciones anadidas al modulo DESPUES del movimiento verbatim de FUND-03.
+#: BW-02 sumo la extraccion de puntos Betterware, que es legitimamente parte de
+#: la capa de extraccion. Declararlas aqui conserva la garantia original —el
+#: bloque verbatim sigue completo, en orden y al principio— sin degradarla a
+#: "cualquier cosa vale detras": una funcion nueva no declarada rompe el test,
+#: que es exactamente lo que FUND-03 queria proteger.
+FUNCIONES_AGREGADAS: Final[tuple[str, ...]] = (
+    "extraer_puntos_bw",
+    "extraer_semana_cierre_bw",
+    "extraer_puntos_de_paginas",
+)
+
 #: Tokens que delatarian acoplamiento con la capa de almacenamiento.
 STORAGE_TOKENS: Final[tuple[str, ...]] = (
     "pandas",
@@ -133,9 +145,10 @@ def test_moved_function_source_is_verbatim_copy_of_reference(nombre: str) -> Non
 
 
 def test_extractor_defines_exactly_the_planned_functions() -> None:
-    destino = _function_sources(EXTRACTOR_PATH)
+    destino = tuple(_function_sources(EXTRACTOR_PATH))
 
-    assert tuple(destino) == MOVED_FUNCTIONS
+    assert destino[: len(MOVED_FUNCTIONS)] == MOVED_FUNCTIONS
+    assert destino == MOVED_FUNCTIONS + FUNCIONES_AGREGADAS
 
 
 # ---------------------------------------------------------------------

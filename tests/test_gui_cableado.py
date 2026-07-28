@@ -70,21 +70,17 @@ def test_confirmar_carga_usa_la_firma_nueva() -> None:
 
 
 #: Nombres que la GUI todavia invoca como `core.X` y que la fachada aun no
-#: expone, porque su migracion Excel->SQLite pertenece a una oleada posterior:
-#: la pestana Entregas depende de CLI-04. Es deuda declarada, no un descuido.
-#: **Esta lista solo puede encoger.** Si un nombre nuevo aparece en el fallo de
-#: `test_gui_no_referencia_core_inexistente`, es un bug real: la GUI quedo
-#: llamando a algo que la capa core no ofrece, y el guard
-#: `os.path.exists(EXCEL_PATH)` lo enmascara hasta que la usuaria abre esa
-#: pestana en una instalacion sin xlsx.
-PENDIENTES_CLI04: Final[frozenset[str]] = frozenset(
-    {
-        "FORMA_PAGO_OPCIONES",
-        "STATUS_ASOCIADO_OPCIONES",
-        "actualizar_entrega_asociado",
-        "obtener_entregas_asociado",
-    }
-)
+#: expone, porque su migracion Excel->SQLite pertenece a una oleada posterior.
+#: **Esta lista solo puede encoger**, y con CLI-04 quedo vacia: la pestana
+#: Entregas ya lee de SQLite (`core.listar_entregas`), los abonos se capturan en
+#: `VentanaPagos` y `VentanaDetalleEntrega` -- que era quien sostenia
+#: `FORMA_PAGO_OPCIONES`, `STATUS_ASOCIADO_OPCIONES` y
+#: `actualizar_entrega_asociado` -- salio del arbol.
+#:
+#: Vacia, la allowlist convierte `test_gui_no_referencia_core_inexistente` en lo
+#: que siempre quiso ser: **todo** `core.X` de la GUI existe en la fachada, sin
+#: excepciones toleradas.
+PENDIENTES_CLI04: Final[frozenset[str]] = frozenset()
 
 
 def _atributos_core_usados() -> set[str]:

@@ -120,9 +120,38 @@ def test_guardar_pedido_creates_one_row_per_folio(conn: sqlite3.Connection) -> N
     assert fila_db["archivo_origen"] == "C001264_NOTA.pdf (pag. 1)"
 
 
-def test_guardar_pedido_deja_semana_id_nulo(conn: sqlite3.Connection) -> None:
-    """R8: la vinculacion con la semana es de BW-01, aqui queda NULL sin fallar."""
-    pedido_id = core.guardar_pedido(conn, fila_pdf())
+def test_guardar_pedido_vincula_la_semana_de_la_meta(
+    conn: sqlite3.Connection,
+) -> None:
+    """BW-01 R5 (supersede de MERC-01 R8): la cabecera queda ligada a su semana.
+
+    MERC-01 dejaba `semana_id` en NULL de forma incondicional; BW-01 lo
+    reemplaza: con `"Semana"` en la meta la cabecera apunta a la fila de
+    `semanas_catalogo` de ese texto, y solo sin semana se conserva el NULL.
+    """
+    fila = fila_pdf()
+
+    pedido_id = core.guardar_pedido(conn, fila)
+
+    fila_db = conn.execute(
+        "SELECT semana_id FROM pedidos WHERE id = ?", (pedido_id,)
+    ).fetchone()
+    semana = conn.execute(
+        "SELECT id FROM semanas_catalogo WHERE semana_texto = ?",
+        (fila["Semana"],),
+    ).fetchone()
+    assert semana is not None
+    assert fila_db["semana_id"] == semana["id"]
+
+
+def test_guardar_pedido_sin_semana_deja_semana_id_nulo(
+    conn: sqlite3.Connection,
+) -> None:
+    """BW-01 R5: la FK sigue siendo nullable cuando la nota no trae semana."""
+    fila = fila_pdf()
+    fila["Semana"] = ""
+
+    pedido_id = core.guardar_pedido(conn, fila)
 
     fila_db = conn.execute(
         "SELECT semana_id FROM pedidos WHERE id = ?", (pedido_id,)
@@ -699,8 +728,16 @@ def test_obtener_movimientos_sin_nombre_en_ninguna_fuente_devuelve_cadena_vacia(
 def test_obtener_movimientos_sin_semana_vinculada_devuelve_cadena_vacia(
     conn: sqlite3.Connection,
 ) -> None:
-    """R3: `semana_id` es nullable hasta BW-01; el LEFT JOIN no descarta la fila."""
-    core.confirmar_carga(conn, [fila_pdf()])
+    """R3: `semana_id` sigue siendo nullable; el LEFT JOIN no descarta la fila.
+
+    Desde BW-01 la unica forma de no tener semana vinculada es que la nota no
+    traiga `"Semana"`: con texto, `guardar_pedido` la resuelve contra el
+    catalogo. El caso que este test protege -- el degradado a `""` del
+    `COALESCE` -- es el mismo.
+    """
+    fila = fila_pdf()
+    fila["Semana"] = ""
+    core.confirmar_carga(conn, [fila])
 
     movimientos = core_pedidos.obtener_movimientos(conn)
 

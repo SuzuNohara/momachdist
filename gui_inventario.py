@@ -17,7 +17,9 @@ El Excel maestro se guarda siempre junto al programa, con el nombre
 la operacion del dia a dia se hace desde esta interfaz.
 """
 
+import datetime
 import os
+import sqlite3
 import sys
 import logging
 import subprocess
@@ -48,6 +50,24 @@ STATUS_ASOCIADO_OPCIONES = ("Activo", "Inactivo")
 # comparaciones se hacen sobre este prefijo y nunca sobre la hora.
 LARGO_FECHA: Final[int] = 10
 
+# Clave de `core.PAGO_TABLAS` que le corresponde a una entrega a asociado. Se
+# nombra aqui una sola vez para que la pestana y el dialogo de pagos no puedan
+# desincronizarse; el resto de dominios (venta, encargo) pasan la suya.
+TABLA_PAGOS_ENTREGA: Final[str] = "entrega_pagos"
+
+# Color de fila por status de entrega. Deriva de `core.ENTREGA_STATUS_VALIDOS`,
+# que es el espejo del CHECK del esquema: un status nuevo en la capa core cae al
+# tag neutro en vez de romper el pintado.
+TAGS_STATUS_ENTREGA: Final[dict[str, str]] = {
+    "Pagado": "pagado",
+    "Recogido - no pagado": "pendiente_pago",
+    "Pendiente de recoger": "pendiente_recoger",
+}
+
+# `pdf_extractor` sella cada fila con "<nombre.pdf> (pag. N)": el sufijo de
+# pagina se recorta para poder cruzar la fila con la ruta que devolvio el
+# dialogo de seleccion de archivos.
+SUFIJO_PAGINA_ORIGEN: Final[str] = " (pag."
 
 def ruta_base():
     """Carpeta donde vive el programa (funciona igual como .py o como .exe)."""
@@ -67,6 +87,37 @@ def etiqueta_formulario(padre, texto, primera=False) -> tk.Label:
     etiqueta = tk.Label(padre, text=texto, bg="#FFFFFF", font=("Arial", 10))
     etiqueta.pack(anchor="w", padx=20, pady=(20 if primera else 15, 0))
     return etiqueta
+
+
+def _semana_por_archivo(filas: list[dict]) -> dict[str, str]:
+    """Primera semana no vacia que aporta cada PDF de la carga (BW-02 R7).
+
+    `pdf_extractor` sella cada fila con `"Archivo origen"` =
+    `"<nombre.pdf> (pag. N)"`, es decir el **nombre** del archivo y la pagina,
+    nunca una ruta abrible. Este mapa se indexa por ese nombre para poder
+    cruzarlo despues con las rutas completas que devolvio el dialogo de
+    seleccion, que son las unicas que `procesar_puntos_bw` puede abrir.
+
+    Todas las filas de una misma nota comparten semana, asi que la primera que
+    aparece es la del pedido; las filas sin semana se ignoran porque sin ella no
+    hay a que semana atribuir los puntos.
+
+    Args:
+        filas: filas confirmadas en la vista previa.
+
+    Returns:
+        Mapa `nombre de archivo -> texto de la semana` (p. ej. `"30 - 2026"`).
+
+    Time: O(n) sobre las filas | Space: O(a) sobre los archivos distintos
+    """
+    semanas: dict[str, str] = {}
+    for fila in filas:
+        origen = str(fila.get("Archivo origen", "") or "")
+        nombre = origen.split(SUFIJO_PAGINA_ORIGEN)[0].strip()
+        semana = str(fila.get(core.CLAVE_SEMANA, "") or "").strip()
+        if nombre and semana:
+            semanas.setdefault(nombre, semana)
+    return semanas
 
 
 EXCEL_PATH = os.path.join(ruta_base(), "inventario_betterware.xlsx")
@@ -89,6 +140,8 @@ class App(tk.Tk):
         # (ADR-2: la capa core nunca abre conexiones por su cuenta). `init_db`
         # es idempotente, asi que sirve de arranque y de migracion en un paso.
         self.conn = db.init_db(DB_PATH)
+        # PDF de la carga en curso: los pone `abrir_flujo_carga_pdf`.
+        self.rutas_pdf_carga: list[str] = []
         self.title(APP_TITLE)
         self.geometry("1150x720")
         self.configure(bg="#FFFFFF")
@@ -141,6 +194,12 @@ class App(tk.Tk):
             barra, text="🛒 Registrar venta", font=("Arial", 10, "bold"),
             bg="white", fg=COLOR_ROSA, relief="flat", padx=12, pady=6,
             command=self.abrir_ventana_venta,
+        ).pack(side="left", padx=8, pady=10)
+
+        tk.Button(
+            barra, text="🏅 Puntos Betterware", font=("Arial", 10),
+            bg=COLOR_MARCA, fg="white", relief="flat", padx=12, pady=6,
+            command=self.abrir_ventana_puntos, highlightthickness=0, bd=0,
         ).pack(side="left", padx=8, pady=10)
 
         tk.Button(
@@ -197,20 +256,121 @@ class App(tk.Tk):
             self.mostrar_status(mensaje, "#CC0000")
             return
 
+        # Las rutas quedan en la App -- y no en la vista previa -- porque son
+        # estado del flujo de carga, que la App gobierna de principio a fin:
+        # seleccionar -> previsualizar -> confirmar. `procesar_puntos_bw` las
+        # necesita para reabrir cada PDF, y `"Archivo origen"` de la fila solo
+        # trae el nombre del archivo y la pagina, no una ruta.
+        self.rutas_pdf_carga = list(archivos)
+
         self.mostrar_status("")
         VentanaPrevisualizacion(self, filas, errores)
 
-    def al_confirmar_carga(self, filas_confirmadas):
+    def al_confirmar_carga(self, filas_confirmadas, rutas_pdf=None):
+        """Guarda la carga y encadena sus dos consecuencias de dominio.
+
+        Confirmar la carga era solo el primer paso del flujo real: sin generar
+        las entregas a asociado (DEUDA-03) la pestana de Entregas queda vacia y
+        el saldo por asociado no existe, y sin procesar los puntos del PDF
+        (BW-02 R7) la semana se queda sin su `Total PB acumulados`. Ninguna de
+        las dos tenia call-site hasta esta ola.
+
+        Los tres pasos son **independientes**: cada uno delimita su propia
+        transaccion en la capa core, asi que un fallo tardio no revierte lo ya
+        commiteado. El guardado corta el flujo si falla -- sin pedido no hay
+        nada que derivar --, pero los dos siguientes solo avisan. Ambos son
+        idempotentes (`NOT EXISTS` en `generar_entregas`, semantica de maximo en
+        los puntos), asi que reintentar la carga recupera lo que se perdiera.
+
+        Args:
+            filas_confirmadas: filas ya revisadas en la vista previa.
+            rutas_pdf: rutas **abribles** de los PDF de origen. Por omision, las
+                que dejo `abrir_flujo_carga_pdf`.
+
+        Time: O(n) sobre las filas | Space: O(a) sobre los PDF distintos
+        """
         try:
             core.confirmar_carga(self.conn, filas_confirmadas)
-        except Exception as e:
+        except core.CargaError as e:
             logger.exception("Fallo el guardado de la carga confirmada")
             messagebox.showerror(APP_TITLE, f"Ocurrió un error al guardar:\n{e}")
             return
 
+        self._generar_entregas_de_la_carga()
+        self._procesar_puntos_de_la_carga(
+            filas_confirmadas,
+            self.rutas_pdf_carga if rutas_pdf is None else rutas_pdf,
+        )
+
         self.mostrar_status(f"Listo. Se agregaron {len(filas_confirmadas)} producto(s) al inventario.")
         self.refrescar_todo()
         messagebox.showinfo(APP_TITLE, "El inventario se actualizó correctamente.")
+
+    def _generar_entregas_de_la_carga(self):
+        """Materializa las entregas a asociado de lo recien cargado (DEUDA-03).
+
+        `generar_entregas` es idempotente y set-based: recorre todo el detalle
+        pendiente, no solo el de esta carga, de modo que tambien recupera las
+        entregas que una corrida anterior no llegara a crear. Un fallo aqui no
+        toca la carga ya commiteada: se avisa y el flujo sigue.
+
+        Time: O(n) sobre las lineas candidatas | Space: O(1)
+        """
+        try:
+            creadas = core.generar_entregas(self.conn)
+        except core.EntregaError as e:
+            logger.exception("Fallo la generacion de entregas tras la carga")
+            messagebox.showwarning(
+                APP_TITLE,
+                "La carga se guardó, pero no se pudieron generar las entregas "
+                f"al asociado:\n{e}",
+            )
+            return
+        logger.info("Se generaron %d entrega(s) a asociado", creadas)
+
+    def _procesar_puntos_de_la_carga(self, filas_confirmadas, rutas_pdf):
+        """Actualiza los puntos Betterware de cada PDF de la carga (BW-02 R7).
+
+        La semana sale de las filas ya confirmadas y la ruta del dialogo de
+        seleccion; un PDF sin semana reconocible simplemente no aporta puntos.
+
+        Time: O(n + a) sobre filas y archivos | Space: O(a)
+        """
+        semanas = _semana_por_archivo(filas_confirmadas)
+        for ruta in rutas_pdf or ():
+            semana_texto = semanas.get(os.path.basename(ruta))
+            if semana_texto:
+                self._procesar_puntos_de_pdf(ruta, semana_texto)
+
+    def _procesar_puntos_de_pdf(self, ruta, semana_texto):
+        """Extrae y fija los puntos de un PDF concreto (BW-02 R7).
+
+        Se capturan los errores de dominio (`CoreError` -- que ya envuelve los
+        fallos del lector de PDF, incluido un archivo corrupto) y los de SQLite
+        que `obtener_o_crear_semana` propaga sin envolver. Un PDF ilegible aqui
+        es improbable -- `preparar_filas_desde_pdfs` acaba de abrirlo en el mismo
+        flujo -- pero el archivo puede haberse movido o truncado entre la vista
+        previa y la confirmacion, y ese fallo no puede tumbar una carga ya
+        guardada.
+
+        Time: O(p * n) sobre las paginas del PDF | Space: O(p)
+        """
+        try:
+            semana_id = core.obtener_o_crear_semana(self.conn, semana_texto)
+            _numero, anio = core._parsear_semana(semana_texto)
+            if semana_id is not None and anio is not None:
+                core.procesar_puntos_bw(self.conn, ruta, semana_id, anio)
+        except (core.CoreError, sqlite3.Error, ValueError) as e:
+            logger.exception("Fallo el procesado de puntos Betterware de %s", ruta)
+            messagebox.showwarning(
+                APP_TITLE,
+                "La carga se guardó, pero no se pudieron actualizar los puntos "
+                f"Betterware de {os.path.basename(ruta)}:\n{e}",
+            )
+
+    def abrir_ventana_puntos(self):
+        """Abre la correccion manual de puntos Betterware (BW-02 R8, D9)."""
+        VentanaPuntosSemana(self)
 
     def abrir_ventana_venta(self, codigo_preseleccionado=None):
         """Abre la ventana de venta contra la base, ya no contra el Excel.
@@ -646,33 +806,97 @@ class TabVentas(ttk.Frame):
 # ======================================================================
 
 class TabEntregas(ttk.Frame):
+    """Entregas a asociado leidas de SQLite (CLI-04, R5/R6/R7).
+
+    Sustituye por completo a la version Excel: el listado sale de
+    `core.listar_entregas` (un JOIN que resuelve folio, producto y asociado) y
+    los abonos se capturan en `VentanaPagos`, el componente compartido, no en un
+    dialogo propio con dos formas de pago fijas.
+
+    **`pagado` y `saldo` se muestran junto a `status` a proposito.** Marcar una
+    entrega como "Pagado" no registra abono ni mueve saldo -- status y dinero
+    son ejes independientes en la capa core --, asi que una entrega puede quedar
+    en "Pagado" con saldo > 0. Tener las tres columnas a la vista hace visible
+    esa discrepancia en vez de esconderla.
+
+    El `iid` de cada fila es el `entregas_asociado.id` real, de modo que la
+    seleccion se traduce a clave primaria sin depender del orden del listado.
+    """
+
+    COLUMNAS: Final[tuple[str, ...]] = (
+        "fecha", "folio", "codigo", "descripcion", "cantidad",
+        "monto", "pagado", "saldo", "status",
+    )
+
+    TITULOS: Final[dict[str, str]] = {
+        "fecha": "Fecha", "folio": "Folio", "codigo": "Código",
+        "descripcion": "Descripción", "cantidad": "Cant.", "monto": "Debe pagar",
+        "pagado": "Pagado", "saldo": "Saldo", "status": "Status",
+    }
+
+    ANCHOS: Final[dict[str, int]] = {
+        "fecha": 100, "folio": 100, "codigo": 65, "descripcion": 200, "cantidad": 50,
+        "monto": 90, "pagado": 90, "saldo": 90, "status": 150,
+    }
+
     def __init__(self, notebook, app):
         super().__init__(notebook)
         self.app = app
-        self.datos_completos = []
+        # Cache del ultimo listado indexado por id: evita releer la base para
+        # resolver la fila seleccionada (anti N+1, `.langs/python.md` 4).
+        self.entregas: dict[int, dict] = {}
+
+        self._construir_barra()
+        self._construir_tabla()
+
+    def _construir_barra(self) -> None:
+        """Control de status de la entrega seleccionada (R7).
+
+        Time: O(1) | Space: O(1)
+        """
+        barra = tk.Frame(self)
+        barra.pack(fill="x", padx=15, pady=(15, 5))
 
         tk.Label(
-            self, text="Doble clic sobre una entrega para actualizar su status o registrar el pago.",
-            font=("Arial", 9), fg="#666666",
-        ).pack(pady=(15, 5))
+            barra, text="Status:", font=("Arial", 10),
+        ).pack(side="left", padx=(0, 6))
 
+        self.status_var = tk.StringVar(value=core.ENTREGA_STATUS_VALIDOS[0])
+        self.combo_status = ttk.Combobox(
+            barra, textvariable=self.status_var, state="readonly", width=22,
+            values=list(core.ENTREGA_STATUS_VALIDOS), font=("Arial", 10),
+        )
+        self.combo_status.pack(side="left")
+
+        tk.Button(
+            barra, text="Aplicar status", font=("Arial", 10, "bold"),
+            bg=COLOR_MARCA, fg="white", relief="flat", padx=12, pady=4,
+            command=self._aplicar_status,
+        ).pack(side="left", padx=8)
+
+        tk.Label(
+            barra,
+            text="Doble clic sobre una entrega para registrar o consultar sus pagos.",
+            font=("Arial", 9), fg="#666666",
+        ).pack(side="right")
+
+    def _construir_tabla(self) -> None:
+        """Treeview de entregas con el color de fila por status.
+
+        Time: O(c) sobre las columnas | Space: O(1)
+        """
         frame_tabla = tk.Frame(self)
         frame_tabla.pack(fill="both", expand=True, padx=15, pady=(0, 15))
 
-        columnas = ("fecha", "folio", "codigo", "descripcion", "cantidad", "monto", "status", "pago1", "monto1", "pago2", "monto2")
-        self.tree = ttk.Treeview(frame_tabla, columns=columnas, show="headings", height=18)
-        titulos = {
-            "fecha": "Fecha", "folio": "Folio", "codigo": "Código", "descripcion": "Descripción",
-            "cantidad": "Cant.", "monto": "Debe pagar", "status": "Status", "pago1": "Forma pago 1",
-            "monto1": "Monto 1", "pago2": "Forma pago 2", "monto2": "Monto 2",
-        }
-        anchos = {
-            "fecha": 110, "folio": 110, "codigo": 65, "descripcion": 170, "cantidad": 50,
-            "monto": 85, "status": 140, "pago1": 95, "monto1": 75, "pago2": 95, "monto2": 75,
-        }
-        for col in columnas:
-            self.tree.heading(col, text=titulos[col])
-            self.tree.column(col, width=anchos[col], anchor="center" if col != "descripcion" else "w")
+        self.tree = ttk.Treeview(
+            frame_tabla, columns=self.COLUMNAS, show="headings", height=18
+        )
+        for col in self.COLUMNAS:
+            self.tree.heading(col, text=self.TITULOS[col])
+            self.tree.column(
+                col, width=self.ANCHOS[col],
+                anchor="center" if col != "descripcion" else "w",
+            )
 
         self.tree.tag_configure("pagado", background="#D4EDDA")
         self.tree.tag_configure("pendiente_pago", background="#FFF3CD")
@@ -683,40 +907,116 @@ class TabEntregas(ttk.Frame):
         self.tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="right", fill="y")
 
-        self.tree.bind("<Double-1>", self._abrir_detalle)
+        self.tree.bind("<Double-1>", self._abrir_pagos)
 
     def refrescar(self):
-        if not os.path.exists(EXCEL_PATH):
-            self.datos_completos = []
-        else:
-            self.datos_completos = core.obtener_entregas_asociado(EXCEL_PATH)
+        """Repuebla la tabla desde la capa core (R5, R6).
 
+        **N+1 asumido a conciencia** (`.langs/python.md` 4): `listar_entregas`
+        resuelve folio, producto y asociado en una sola consulta, pero `pagado`
+        y `saldo` se piden por fila a `core_pagos`, de modo que pintar la
+        pestana cuesta `2n + 1` consultas. Se acepta porque el volumen real es
+        de decenas de entregas y porque la alternativa -- agregar los pagos en
+        el JOIN -- duplicaria la semantica de redondeo que vive en `core_pagos`
+        y las dos cifras acabarian divergiendo.
+
+        Time: O(n log m) sobre las entregas | Space: O(n)
+        """
         self.tree.delete(*self.tree.get_children())
-        for entrega in self.datos_completos:
-            status = entrega.get("Status", "")
-            if status == "Pagado":
-                tag = "pagado"
-            elif status == "Recogido - no pagado":
-                tag = "pendiente_pago"
-            else:
-                tag = "pendiente_recoger"
+        try:
+            entregas = core.listar_entregas(self.app.conn)
+            filas = [(e, self._fila_visible(e)) for e in entregas]
+        except core.CoreError as e:
+            logger.exception("Fallo la lectura de las entregas a asociado")
+            messagebox.showerror(APP_TITLE, f"No se pudieron leer las entregas:\n{e}")
+            self.entregas = {}
+            return
 
-            self.tree.insert("", "end", iid=str(entrega["_indice"]), tags=(tag,), values=(
-                entrega.get("Fecha entrega", ""), entrega.get("Folio de pedido", ""), entrega.get("Codigo", ""),
-                entrega.get("Descripcion", ""), entrega.get("Cantidad entregada", 0),
-                f"${float(entrega.get('Monto que debe pagar', 0) or 0):.2f}", status,
-                entrega.get("Forma de pago 1", "") or "", entrega.get("Monto 1", "") or "",
-                entrega.get("Forma de pago 2", "") or "", entrega.get("Monto 2", "") or "",
-            ))
+        self.entregas = {int(entrega["id"]): entrega for entrega in entregas}
+        for entrega, valores in filas:
+            tag = TAGS_STATUS_ENTREGA.get(str(entrega["status"]), "pendiente_recoger")
+            self.tree.insert(
+                "", "end", iid=str(entrega["id"]), tags=(tag,), values=valores
+            )
 
-    def _abrir_detalle(self, event):
+    def _fila_visible(self, entrega: dict) -> tuple:
+        """Valores de una fila, con los agregados de pago de esa entrega.
+
+        Time: O(log m) por entrega | Space: O(1)
+        """
+        entrega_id = int(entrega["id"])
+        monto = float(entrega["monto_que_debe"] or 0)
+        pagado = core.total_pagado(self.app.conn, TABLA_PAGOS_ENTREGA, entrega_id)
+        saldo = core.saldo_pendiente(
+            self.app.conn, TABLA_PAGOS_ENTREGA, entrega_id, monto
+        )
+        return (
+            entrega["fecha_entrega"] or "",
+            entrega["folio_pedido"] or "",
+            entrega["codigo_articulo"] or "",
+            entrega["descripcion"] or "",
+            entrega["cantidad_entregada"],
+            f"${monto:.2f}",
+            f"${pagado:.2f}",
+            f"${saldo:.2f}",
+            entrega["status"],
+        )
+
+    def _id_seleccionado(self) -> int | None:
+        """Id de la entrega seleccionada, avisando si no hay ninguna.
+
+        Time: O(1) | Space: O(1)
+        """
+        seleccion = self.tree.selection()
+        if not seleccion:
+            messagebox.showinfo(APP_TITLE, "Primero selecciona una entrega de la lista.")
+            return None
+        return int(seleccion[0])
+
+    def _aplicar_status(self) -> None:
+        """Enruta el cambio de status por la capa core y refresca (R7).
+
+        `actualizar_status_entrega` valida contra `ENTREGA_STATUS_VALIDOS`
+        **antes** de tocar la base, asi que un status invalido llega como error
+        de dominio y no como `IntegrityError`. No mueve saldo: eso es exclusivo
+        de los triggers de `entrega_pagos` (ADR-3).
+
+        Time: O(log n) | Space: O(1)
+        """
+        entrega_id = self._id_seleccionado()
+        if entrega_id is None:
+            return
+
+        try:
+            core.actualizar_status_entrega(
+                self.app.conn, entrega_id, self.status_var.get()
+            )
+        except core.EntregaError as e:
+            logger.exception("Fallo el cambio de status de la entrega %s", entrega_id)
+            messagebox.showerror(APP_TITLE, f"No se pudo cambiar el status:\n{e}")
+            return
+
+        self.refrescar()
+
+    def _abrir_pagos(self, event) -> None:
+        """Abre el dialogo de pagos de la entrega con doble clic (R6).
+
+        Time: O(1) | Space: O(1)
+        """
         seleccion = self.tree.selection()
         if not seleccion:
             return
-        indice = int(seleccion[0])
-        entrega = next((e for e in self.datos_completos if e["_indice"] == indice), None)
-        if entrega:
-            VentanaDetalleEntrega(self.app, entrega)
+        entrega = self.entregas.get(int(seleccion[0]))
+        if entrega is None:
+            return
+
+        VentanaPagos(
+            self.app,
+            TABLA_PAGOS_ENTREGA,
+            int(entrega["id"]),
+            float(entrega["monto_que_debe"] or 0),
+            f"Pagos de la entrega #{entrega['id']} — {entrega['asociado']}",
+        )
 
 
 # ======================================================================
@@ -1178,99 +1478,427 @@ class VentanaClienteForm(tk.Toplevel):
 
 
 # ======================================================================
-# Dialogo: detalle / actualizar entrega a Asociado
+# Dialogo: pagos de un padre cualquiera (venta / entrega / encargo)
 # ======================================================================
 
-class VentanaDetalleEntrega(tk.Toplevel):
-    def __init__(self, app, entrega):
+class VentanaPagos(tk.Toplevel):
+    """Captura y consulta de abonos, **agnostica del dominio padre** (CLI-03 R9).
+
+    Es el unico lugar del sistema donde se registran pagos. La entrega a
+    asociado (CLI-04) lo abre con `"entrega_pagos"`, la venta con
+    `"venta_pagos"` y el anticipo de encargo (ENC-02) lo abrira con
+    `"encargo_pagos"`: todo lo especifico del dominio -- la tabla, el id del
+    padre, el total a cubrir y el titulo -- entra por el constructor, de modo
+    que aqui dentro no hay ni una referencia a ventas ni a entregas. Es el
+    espejo en la GUI de lo que `core_pagos` hizo en la capa core (ADR-6).
+
+    El componente no escribe `asociados.saldo_pendiente` (ADR-3, riesgo RT-3):
+    registrar el abono con `core.agregar_pago` ya lo baja por el trigger
+    `trg_pago_insert`, y tocarlo tambien desde aqui seria contarlo dos veces.
+    """
+
+    COLUMNAS: Final[tuple[str, ...]] = ("fecha", "forma", "monto")
+
+    TITULOS: Final[dict[str, str]] = {
+        "fecha": "Fecha", "forma": "Forma de pago", "monto": "Monto",
+    }
+
+    ANCHOS: Final[dict[str, int]] = {"fecha": 110, "forma": 160, "monto": 110}
+
+    def __init__(self, app, tabla, parent_id, total, titulo="Pagos"):
         super().__init__(app)
         self.app = app
-        self.entrega = entrega
-        self.title("Entrega a Asociado")
-        self.geometry("420x480")
-        self.resizable(False, False)
+        self.tabla = tabla
+        self.parent_id = parent_id
+        self.total = float(total or 0)
+        self.title(titulo)
+        self.geometry("520x520")
         self.configure(bg="#FFFFFF")
 
         tk.Label(
-            self, text=entrega.get("Descripcion", ""), font=("Arial", 13, "bold"),
-            bg="#FFFFFF", fg=COLOR_MARCA, wraplength=380,
-        ).pack(pady=(20, 5))
-        tk.Label(
-            self,
-            text=f"Código: {entrega.get('Codigo', '')}   |   Cantidad: {entrega.get('Cantidad entregada', 0)}\n"
-                 f"Debe pagar: ${float(entrega.get('Monto que debe pagar', 0) or 0):.2f}",
-            font=("Arial", 10), bg="#FFFFFF", fg="#444444",
-        ).pack(pady=(0, 15))
+            self, text=titulo, font=("Arial", 13, "bold"),
+            bg="#FFFFFF", fg=COLOR_MARCA, wraplength=470,
+        ).pack(pady=(20, 10))
 
-        tk.Label(self, text="Status:", bg="#FFFFFF", font=("Arial", 10)).pack(anchor="w", padx=20)
-        self.status_var = tk.StringVar(value=entrega.get("Status", core.STATUS_ASOCIADO_OPCIONES[0]))
-        ttk.Combobox(
-            self, textvariable=self.status_var, state="readonly",
-            values=core.STATUS_ASOCIADO_OPCIONES, font=("Arial", 10),
-        ).pack(fill="x", padx=20, pady=(0, 15))
+        self._construir_tabla()
+        self._construir_totales()
+        self._construir_formulario()
 
+        self._refrescar()
+
+    def _construir_tabla(self) -> None:
+        """Treeview con los abonos ya registrados del padre.
+
+        Time: O(c) sobre las columnas | Space: O(1)
+        """
+        frame_tabla = tk.Frame(self)
+        frame_tabla.pack(fill="both", expand=True, padx=20)
+
+        self.tree = ttk.Treeview(
+            frame_tabla, columns=self.COLUMNAS, show="headings", height=8
+        )
+        for col in self.COLUMNAS:
+            self.tree.heading(col, text=self.TITULOS[col])
+            self.tree.column(col, width=self.ANCHOS[col], anchor="center")
+
+        scrollbar = ttk.Scrollbar(frame_tabla, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+    def _construir_totales(self) -> None:
+        """Panel de pagado / total / saldo, que `_refrescar` mantiene al dia.
+
+        Time: O(1) | Space: O(1)
+        """
+        panel = tk.Frame(self, bg="#F5F5F5")
+        panel.pack(fill="x", padx=20, pady=10)
+
+        self.lbl_pagado = tk.Label(
+            panel, text="Pagado: $0.00", font=("Arial", 10, "bold"),
+            bg="#F5F5F5", fg="#008000", padx=10, pady=6,
+        )
+        self.lbl_pagado.pack(side="left")
+
+        self.lbl_total = tk.Label(
+            panel, text="Total: $0.00", font=("Arial", 10),
+            bg="#F5F5F5", fg="#444444", padx=10, pady=6,
+        )
+        self.lbl_total.pack(side="left")
+
+        self.lbl_saldo = tk.Label(
+            panel, text="Saldo: $0.00", font=("Arial", 10, "bold"),
+            bg="#F5F5F5", fg=COLOR_ROSA, padx=10, pady=6,
+        )
+        self.lbl_saldo.pack(side="right")
+
+    def _construir_formulario(self) -> None:
+        """Alta de un abono: forma, monto y fecha (por defecto hoy).
+
+        Las opciones del combo salen de `core.FORMAS_PAGO_VALIDAS`, que espeja
+        el CHECK del esquema: no hay una segunda lista que mantener aqui.
+
+        Time: O(f) sobre las formas de pago | Space: O(f)
+        """
         form = tk.Frame(self, bg="#FFFFFF")
-        form.pack(fill="x", padx=20)
+        form.pack(fill="x", padx=20, pady=(0, 10))
 
-        tk.Label(form, text="Forma de pago 1:", bg="#FFFFFF", font=("Arial", 10)).grid(row=0, column=0, sticky="w", pady=5)
-        self.pago1_var = tk.StringVar(value=entrega.get("Forma de pago 1", "") or "")
-        ttk.Combobox(form, textvariable=self.pago1_var, state="readonly", width=15, values=[""] + core.FORMA_PAGO_OPCIONES).grid(row=0, column=1)
+        formas = sorted(core.FORMAS_PAGO_VALIDAS)
 
-        tk.Label(form, text="Monto 1:", bg="#FFFFFF", font=("Arial", 10)).grid(row=1, column=0, sticky="w", pady=5)
-        self.monto1_var = tk.StringVar(value=str(entrega.get("Monto 1", "") or ""))
-        tk.Entry(form, textvariable=self.monto1_var, width=17).grid(row=1, column=1)
+        tk.Label(form, text="Forma:", bg="#FFFFFF", font=("Arial", 10)).grid(
+            row=0, column=0, sticky="w", pady=4
+        )
+        self.forma_var = tk.StringVar(value=formas[0])
+        ttk.Combobox(
+            form, textvariable=self.forma_var, state="readonly",
+            width=16, values=formas,
+        ).grid(row=0, column=1, sticky="w")
 
-        tk.Label(form, text="Forma de pago 2:", bg="#FFFFFF", font=("Arial", 10)).grid(row=2, column=0, sticky="w", pady=5)
-        self.pago2_var = tk.StringVar(value=entrega.get("Forma de pago 2", "") or "")
-        ttk.Combobox(form, textvariable=self.pago2_var, state="readonly", width=15, values=[""] + core.FORMA_PAGO_OPCIONES).grid(row=2, column=1)
+        tk.Label(form, text="Monto:", bg="#FFFFFF", font=("Arial", 10)).grid(
+            row=1, column=0, sticky="w", pady=4
+        )
+        self.monto_var = tk.StringVar()
+        tk.Entry(form, textvariable=self.monto_var, width=18).grid(
+            row=1, column=1, sticky="w"
+        )
 
-        tk.Label(form, text="Monto 2:", bg="#FFFFFF", font=("Arial", 10)).grid(row=3, column=0, sticky="w", pady=5)
-        self.monto2_var = tk.StringVar(value=str(entrega.get("Monto 2", "") or ""))
-        tk.Entry(form, textvariable=self.monto2_var, width=17).grid(row=3, column=1)
+        tk.Label(form, text="Fecha:", bg="#FFFFFF", font=("Arial", 10)).grid(
+            row=2, column=0, sticky="w", pady=4
+        )
+        self.fecha_var = tk.StringVar(value=datetime.date.today().isoformat())
+        tk.Entry(form, textvariable=self.fecha_var, width=18).grid(
+            row=2, column=1, sticky="w"
+        )
 
-        tk.Label(self, text="Observaciones:", bg="#FFFFFF", font=("Arial", 10)).pack(anchor="w", padx=20, pady=(15, 0))
-        self.obs_text = tk.Text(self, font=("Arial", 10), height=3)
-        self.obs_text.pack(fill="x", padx=20)
-        if entrega.get("Observaciones"):
-            self.obs_text.insert("1.0", str(entrega.get("Observaciones")))
+        self._construir_accion()
+
+    def _construir_accion(self) -> None:
+        """Aviso inline de captura + boton de alta.
+
+        Time: O(1) | Space: O(1)
+        """
+        self.status_label = tk.Label(
+            self, text="", font=("Arial", 9), bg="#FFFFFF", fg="#CC0000",
+            wraplength=470, justify="left",
+        )
+        self.status_label.pack(fill="x", padx=20)
 
         tk.Button(
-            self, text="Guardar", font=("Arial", 11, "bold"), bg=COLOR_MARCA, fg="white",
-            relief="flat", padx=15, pady=8, command=self._guardar,
-        ).pack(pady=20)
+            self, text="➕ Registrar pago", font=("Arial", 11, "bold"),
+            bg=COLOR_ROSA, fg="white", relief="flat", padx=15, pady=8,
+            command=self._agregar,
+        ).pack(pady=15)
 
-    def _parsear_monto(self, texto):
-        texto = texto.strip()
-        if not texto:
-            return None
+    def _monto_capturado(self) -> float | None:
+        """Monto del formulario, o `None` avisando inline si no es un numero.
+
+        Solo juzga la **forma** de lo capturado; que sea una cantidad de dinero
+        valida (finita y mayor que cero) lo decide `core.agregar_pago`, que es
+        la unica fuente de esa regla.
+
+        Time: O(n) sobre el largo del texto | Space: O(1)
+        """
         try:
-            return float(texto)
+            return float(self.monto_var.get().strip())
         except ValueError:
+            self.status_label.config(
+                text="El monto debe ser un número (ej. 150 o 150.50)."
+            )
             return None
 
-    def _guardar(self):
-        monto1 = self._parsear_monto(self.monto1_var.get())
-        monto2 = self._parsear_monto(self.monto2_var.get())
+    def _agregar(self) -> None:
+        """Registra el abono contra la capa core (R1, R8).
 
-        try:
-            core.actualizar_entrega_asociado(
-                EXCEL_PATH,
-                indice=self.entrega["_indice"],
-                status=self.status_var.get(),
-                forma_pago_1=self.pago1_var.get() or None,
-                monto_1=monto1,
-                forma_pago_2=self.pago2_var.get() or None,
-                monto_2=monto2,
-                observaciones=self.obs_text.get("1.0", tk.END).strip(),
-            )
-        except Exception as e:
-            logger.exception("Fallo la actualizacion de la entrega al asociado")
-            messagebox.showerror(APP_TITLE, f"No se pudo guardar:\n{e}")
+        Los errores de validacion de dominio (`PagoError` y sus tres subclases)
+        se muestran por dialogo sin dejar escapar la excepcion, como exige R9.
+        Nunca se captura `Exception` (`.langs/python.md` 6).
+
+        Time: O(log n) por el indice | Space: O(1)
+        """
+        self.status_label.config(text="")
+        monto = self._monto_capturado()
+        if monto is None:
             return
 
-        self.app.refrescar_todo()
-        self.destroy()
+        try:
+            core.agregar_pago(
+                self.app.conn, self.tabla, self.parent_id,
+                self.forma_var.get(), monto, self.fecha_var.get().strip() or None,
+            )
+        except core.PagoError as e:
+            logger.exception(
+                "Fallo el registro del pago sobre %s#%s", self.tabla, self.parent_id
+            )
+            messagebox.showerror(APP_TITLE, f"No se pudo registrar el pago:\n{e}")
+            return
 
+        self.monto_var.set("")
+        self._refrescar()
+        self.app.refrescar_todo()
+
+    def _refrescar(self) -> None:
+        """Recarga la lista de abonos y recalcula el panel de totales (R5-R7).
+
+        `total_pagado` y `saldo_pendiente` se piden a la capa core en vez de
+        sumarse aqui: es donde vive la semantica de redondeo a dos decimales, y
+        replicarla en la GUI la haria divergir del historial de ventas.
+
+        Time: O(k log n) sobre los abonos del padre | Space: O(k)
+        """
+        try:
+            pagos = core.listar_pagos(self.app.conn, self.tabla, self.parent_id)
+            pagado = core.total_pagado(self.app.conn, self.tabla, self.parent_id)
+            saldo = core.saldo_pendiente(
+                self.app.conn, self.tabla, self.parent_id, self.total
+            )
+        except core.PagoError as e:
+            logger.exception(
+                "Fallo la lectura de pagos de %s#%s", self.tabla, self.parent_id
+            )
+            messagebox.showerror(APP_TITLE, f"No se pudieron leer los pagos:\n{e}")
+            return
+
+        self.tree.delete(*self.tree.get_children())
+        for pago in pagos:
+            self.tree.insert("", "end", iid=str(pago["id"]), values=(
+                pago["fecha"] or "",
+                pago["forma_pago"],
+                f"${float(pago['monto']):.2f}",
+            ))
+
+        self.lbl_pagado.config(text=f"Pagado: ${pagado:.2f}")
+        self.lbl_total.config(text=f"Total: ${self.total:.2f}")
+        self.lbl_saldo.config(text=f"Saldo: ${saldo:.2f}")
+
+
+# ======================================================================
+# Dialogo: correccion manual de puntos Betterware por semana
+# ======================================================================
+
+class VentanaPuntosSemana(tk.Toplevel):
+    """Correccion manual de `puntos_bw_acumulados` de una semana (BW-02 R8).
+
+    **Desviacion D9.** El plan situaba esta afordancia "en la vista de
+    semanas/Betterware", que todavia no existe: la crea BW-03. En vez de
+    inventar una pestana completa que BW-03 tendria que rehacer, esto es un
+    dialogo minimo y autocontenido -- listar, editar, guardar -- que BW-03 podra
+    enlazar o absorber tal cual.
+
+    Guarda siempre con `manual=True`, es decir escribiendo el valor exacto
+    aunque sea menor que el almacenado: la correccion de la usuaria tiene
+    prioridad absoluta sobre lo que extrajo el PDF (R6 de `core_semanas`).
+    """
+
+    COLUMNAS: Final[tuple[str, ...]] = ("semana", "numero", "anio", "puntos")
+
+    TITULOS: Final[dict[str, str]] = {
+        "semana": "Semana", "numero": "Núm.", "anio": "Año", "puntos": "Puntos BW",
+    }
+
+    ANCHOS: Final[dict[str, int]] = {
+        "semana": 140, "numero": 60, "anio": 70, "puntos": 110,
+    }
+
+    def __init__(self, app):
+        super().__init__(app)
+        self.app = app
+        self.title("Puntos Betterware por semana")
+        self.geometry("520x480")
+        self.configure(bg="#FFFFFF")
+
+        tk.Label(
+            self, text="Puntos Betterware", font=("Arial", 13, "bold"),
+            bg="#FFFFFF", fg=COLOR_MARCA,
+        ).pack(pady=(20, 2))
+        tk.Label(
+            self,
+            text="Selecciona una semana y corrige sus puntos acumulados. "
+                 "La corrección manual gana sobre lo que se leyó del PDF.",
+            font=("Arial", 9), bg="#FFFFFF", fg="#666666",
+            wraplength=460, justify="center",
+        ).pack(pady=(0, 10))
+
+        self._construir_tabla()
+        self._construir_formulario()
+
+        self._refrescar()
+
+    def _construir_tabla(self) -> None:
+        """Treeview de semanas, con el `iid` igual al `semanas_catalogo.id`.
+
+        Time: O(c) sobre las columnas | Space: O(1)
+        """
+        frame_tabla = tk.Frame(self)
+        frame_tabla.pack(fill="both", expand=True, padx=20)
+
+        self.tree = ttk.Treeview(
+            frame_tabla, columns=self.COLUMNAS, show="headings", height=10
+        )
+        for col in self.COLUMNAS:
+            self.tree.heading(col, text=self.TITULOS[col])
+            self.tree.column(col, width=self.ANCHOS[col], anchor="center")
+
+        scrollbar = ttk.Scrollbar(frame_tabla, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        self.tree.bind("<<TreeviewSelect>>", self._al_seleccionar)
+
+    def _construir_formulario(self) -> None:
+        """Campo de puntos + boton de guardado.
+
+        Time: O(1) | Space: O(1)
+        """
+        form = tk.Frame(self, bg="#FFFFFF")
+        form.pack(fill="x", padx=20, pady=10)
+
+        tk.Label(form, text="Puntos:", bg="#FFFFFF", font=("Arial", 10)).pack(
+            side="left", padx=(0, 6)
+        )
+        self.puntos_var = tk.StringVar()
+        tk.Entry(form, textvariable=self.puntos_var, width=14).pack(side="left")
+
+        tk.Button(
+            form, text="💾 Guardar", font=("Arial", 10, "bold"),
+            bg=COLOR_MARCA, fg="white", relief="flat", padx=12, pady=6,
+            command=self._guardar,
+        ).pack(side="left", padx=10)
+
+        self.status_label = tk.Label(
+            self, text="", font=("Arial", 9), bg="#FFFFFF", fg="#CC0000",
+            wraplength=460, justify="left",
+        )
+        self.status_label.pack(fill="x", padx=20, pady=(0, 15))
+
+    def _al_seleccionar(self, event=None) -> None:
+        """Precarga en el campo los puntos de la semana seleccionada.
+
+        Time: O(1) | Space: O(1)
+        """
+        seleccion = self.tree.selection()
+        if not seleccion:
+            return
+        self.puntos_var.set(self.tree.set(seleccion[0], "puntos"))
+
+    def _semana_seleccionada(self) -> int | None:
+        """Id de la semana seleccionada, avisando si no hay ninguna.
+
+        Time: O(1) | Space: O(1)
+        """
+        seleccion = self.tree.selection()
+        if not seleccion:
+            self.status_label.config(text="Primero selecciona una semana de la lista.")
+            return None
+        return int(seleccion[0])
+
+    def _puntos_capturados(self) -> int | None:
+        """Puntos del formulario, o `None` avisando inline si no sirven.
+
+        Time: O(n) sobre el largo del texto | Space: O(1)
+        """
+        try:
+            puntos = int(self.puntos_var.get().strip())
+        except ValueError:
+            self.status_label.config(text="Los puntos deben ser un número entero.")
+            return None
+        if puntos < 0:
+            self.status_label.config(text="Los puntos no pueden ser negativos.")
+            return None
+        return puntos
+
+    def _guardar(self) -> None:
+        """Persiste la correccion manual y refresca la lista (R8).
+
+        `manual=True` desactiva la semantica de maximo de `actualizar_puntos_semana`:
+        la usuaria puede corregir tambien a la baja.
+
+        Time: O(log m) | Space: O(1)
+        """
+        self.status_label.config(text="")
+        semana_id = self._semana_seleccionada()
+        if semana_id is None:
+            return
+        puntos = self._puntos_capturados()
+        if puntos is None:
+            return
+
+        try:
+            core.actualizar_puntos_semana(
+                self.app.conn, semana_id, puntos, manual=True
+            )
+        except (core.CoreError, sqlite3.Error) as e:
+            logger.exception("Fallo la correccion manual de puntos de la semana %s", semana_id)
+            messagebox.showerror(APP_TITLE, f"No se pudieron guardar los puntos:\n{e}")
+            return
+
+        self._refrescar()
+        self.tree.selection_set(str(semana_id))
+
+    def _refrescar(self) -> None:
+        """Repuebla la lista de semanas desde la capa core.
+
+        `listar_semanas` ya degrada `NULL` a `0`, asi que el formateo nunca
+        recibe `None`; las semanas cuyo texto no se pudo parsear muestran su
+        numero y anio en blanco.
+
+        Time: O(n) sobre las semanas | Space: O(n)
+        """
+        try:
+            semanas = core.listar_semanas(self.app.conn)
+        except (core.CoreError, sqlite3.Error) as e:
+            logger.exception("Fallo la lectura del catalogo de semanas")
+            messagebox.showerror(APP_TITLE, f"No se pudieron leer las semanas:\n{e}")
+            return
+
+        self.tree.delete(*self.tree.get_children())
+        for semana in semanas:
+            self.tree.insert("", "end", iid=str(semana["id"]), values=(
+                semana["semana_texto"],
+                semana["numero_semana"] if semana["numero_semana"] is not None else "",
+                semana["anio"] if semana["anio"] is not None else "",
+                int(semana["puntos_bw_acumulados"]),
+            ))
 
 # ======================================================================
 # Ventana: Registrar venta
