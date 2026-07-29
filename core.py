@@ -182,6 +182,29 @@ from core_pagos import (
     saldo_pendiente,
     total_pagado,
 )
+from core_conversion import (
+    CAMPOS_RESUMEN,
+    encargo_surtible,
+    surtir_encargo,
+)
+from core_encargos import (
+    CAMPOS_ENCARGO,
+    CAMPOS_LINEA,
+    STATUS_VALIDOS,
+    EncargoError,
+    cancelar_encargo,
+    crear_encargo,
+    editar_encargo,
+    listar_encargos,
+    obtener_encargo,
+)
+from core_pagos import agregar_pago_en_transaccion
+from core_semanas import (
+    CAMPOS_PUNTOS,
+    obtener_puntos_por_semana,
+    resumen_puntos,
+)
+from export_excel import exportar_a_excel
 from core_reparto import (
     CLAVE_ASOCIADO_ID,
     CLAVE_CANTIDAD_ASOCIADO,
@@ -197,11 +220,14 @@ from core_reparto import (
     normalizar_reparto_carga,
 )
 
-from core_ventas import (
+from core_historial import (
     CAMPOS_HISTORIAL,
     CLIENTE_MOSTRADOR,
-    VentaError,
     obtener_ventas_historial,
+)
+from core_ventas import (
+    VentaError,
+    insertar_venta_en_transaccion,
     registrar_venta,
 )
 
@@ -218,7 +244,11 @@ from core_semanas import (
 
 __all__ = [
     "CAMPOS_CLIENTE",
+    "CAMPOS_ENCARGO",
+    "CAMPOS_LINEA",
     "CAMPOS_ENTREGA",
+    "CAMPOS_PUNTOS",
+    "CAMPOS_RESUMEN",
     "CAMPOS_PAGO",
     "CAMPOS_SEMANA",
     "CLAVE_SEMANA",
@@ -246,12 +276,14 @@ __all__ = [
     "SELECT_ASOCIADO_ID_SQL",
     "SELECT_CATALOGO_SQL",
     "SELECT_PEDIDO_ID_SQL",
+    "STATUS_VALIDOS",
     "STOCK_BAJO_UMBRAL",
     "UPSERT_PRODUCTO_SQL",
     "AsociadoError",
     "CargaError",
     "ClienteError",
     "CoreError",
+    "EncargoError",
     "EntregaError",
     "StatusEntregaInvalidoError",
     "FormaPagoInvalidaError",
@@ -261,27 +293,37 @@ __all__ = [
     "VentaError",
     "actualizar_puntos_semana",
     "actualizar_status_entrega",
+    "agregar_pago_en_transaccion",
     "agregar_pago",
     "aplicar_default_post_extraccion",
     "aplicar_reparto_default_asociado",
+    "cancelar_encargo",
+    "crear_encargo",
     "confirmar_carga",
     "crear_asociado",
     "crear_cliente",
     "editar_asociado",
+    "editar_encargo",
+    "encargo_surtible",
     "editar_cliente",
     "eliminar_asociado",
     "eliminar_cliente",
     "estampar_asociado_id",
+    "exportar_a_excel",
     "generar_entregas",
     "guardar_pedido",
     "guardar_pedido_detalle",
+    "insertar_venta_en_transaccion",
     "listar_asociados",
+    "listar_encargos",
     "listar_entregas",
     "listar_pagos",
     "listar_semanas",
     "listar_clientes",
     "normalizar_reparto_carga",
     "obtener_catalogo",
+    "obtener_encargo",
+    "obtener_puntos_por_semana",
     "obtener_existencias",
     "obtener_movimientos",
     "obtener_o_crear_asociado",
@@ -290,7 +332,9 @@ __all__ = [
     "obtener_resumen_dashboard",
     "obtener_ventas_historial",
     "registrar_venta",
+    "resumen_puntos",
     "saldo_pendiente",
+    "surtir_encargo",
     "total_pagado",
     "upsert_producto",
     "upsert_productos",

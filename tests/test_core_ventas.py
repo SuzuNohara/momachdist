@@ -21,6 +21,7 @@ from unittest import mock
 import pytest
 
 import core_existencias
+import core_historial
 import core_ventas
 import db
 
@@ -374,12 +375,12 @@ def test_obtener_ventas_historial_desde_sqlite(conn: sqlite3.Connection) -> None
     )
 
     # Act
-    historial = core_ventas.obtener_ventas_historial(conn)
+    historial = core_historial.obtener_ventas_historial(conn)
 
     # Assert
     assert len(historial) == 1
     fila = historial[0]
-    assert set(fila.keys()) == set(core_ventas.CAMPOS_HISTORIAL)
+    assert set(fila.keys()) == set(core_historial.CAMPOS_HISTORIAL)
     assert fila["venta_id"] == resumen["venta_id"]
     assert fila["codigo"] == "11111"
     assert fila["descripcion"] == "Sarten 24cm"
@@ -392,7 +393,7 @@ def test_obtener_ventas_historial_desde_sqlite(conn: sqlite3.Connection) -> None
 def test_obtener_ventas_historial_bd_vacia(conn: sqlite3.Connection) -> None:
     # Arrange: conexion recien inicializada
     # Act
-    historial = core_ventas.obtener_ventas_historial(conn)
+    historial = core_historial.obtener_ventas_historial(conn)
 
     # Assert
     assert historial == []
@@ -413,3 +414,107 @@ def test_marcadores_solo_produce_interrogaciones(cuantos: int) -> None:
     # Assert
     assert set(salida) <= {"?", ",", " "}
     assert salida.count("?") == cuantos
+
+
+# --- DEUDA-05 / spike ENC-01 H1: las variantes componibles
+
+
+@pytest.mark.parametrize(
+    ("modulo", "funcion"),
+    [
+        ("core_ventas.py", "insertar_venta_en_transaccion"),
+        ("core_pagos.py", "agregar_pago_en_transaccion"),
+    ],
+)
+def test_variante_componible_no_abre_transaccion_propia(
+    modulo: str, funcion: str
+) -> None:
+    """Un `with conn:` dentro rompería la atomicidad de quien las compone.
+
+    ENC-03 inserta la venta y traspasa los anticipos del encargo en una sola
+    transacción. Si estas funciones abrieran la suya, un fallo a mitad del
+    traspaso dejaría la venta ya committeada: el commit parcial que define
+    RT-2 y que el spike ENC-01 documenta como hallazgo H1.
+    """
+    # Arrange
+    ruta = pathlib.Path(__file__).resolve().parent.parent / modulo
+    arbol = ast.parse(ruta.read_text(encoding="utf-8"))
+    nodo = next(
+        n
+        for n in ast.walk(arbol)
+        if isinstance(n, ast.FunctionDef) and n.name == funcion
+    )
+
+    # Act
+    contextos = [
+        ast.unparse(item.context_expr)
+        for hijo in ast.walk(nodo)
+        if isinstance(hijo, ast.With)
+        for item in hijo.items
+    ]
+
+    # Assert
+    assert "conn" not in contextos, (
+        f"{modulo}::{funcion} abre su propia transaccion; debe gobernarla el llamador"
+    )
+
+
+def test_composicion_de_venta_y_pago_revierte_entera(
+    conn: sqlite3.Connection,
+) -> None:
+    """Un fallo tras insertar venta y pago no deja rastro de ninguno."""
+    # Arrange
+    _seed_stock(conn, codigo="11111", piezas=10, costo_total=1000.0)
+    import core_pagos
+
+    lineas = [
+        {
+            "codigo": "11111",
+            "cantidad": 1,
+            "precio_costo": 100.0,
+            "precio_publico": 200.0,
+            "total": 200.0,
+            "ganancia": 100.0,
+        }
+    ]
+
+    # Act
+    with pytest.raises(RuntimeError):
+        with conn:
+            venta_id = core_ventas.insertar_venta_en_transaccion(
+                conn, None, "", lineas
+            )
+            core_pagos.agregar_pago_en_transaccion(
+                conn, "venta_pagos", venta_id, "Efectivo", 50.0
+            )
+            raise RuntimeError("fallo despues de escribir")
+
+    # Assert
+    assert _contar(conn, "SELECT COUNT(*) FROM ventas") == 0
+    assert _contar(conn, "SELECT COUNT(*) FROM venta_detalle") == 0
+    assert _contar(conn, "SELECT COUNT(*) FROM venta_pagos") == 0
+
+
+def test_agregar_pago_valida_antes_de_abrir_la_transaccion() -> None:
+    """R4 exige rechazar una tabla no permitida sin tocar la base.
+
+    `with conn:` ya es tocarla, así que la guarda tiene que correr antes.
+    """
+    # Arrange
+    import core_pagos
+
+    class ConexionCentinela:
+        def __enter__(self) -> None:
+            raise AssertionError("se abrio transaccion antes de validar")
+
+        def __exit__(self, *_: object) -> None:
+            raise AssertionError("se abrio transaccion antes de validar")
+
+        def execute(self, *_: object) -> None:
+            raise AssertionError("se toco la base antes de validar")
+
+    # Act / Assert
+    with pytest.raises(core_pagos.TablaPagoInvalidaError):
+        core_pagos.agregar_pago(
+            ConexionCentinela(), "ventas; DROP TABLE x", 1, "Efectivo", 10.0
+        )

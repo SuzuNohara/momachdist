@@ -13,7 +13,7 @@ alguien "simplifica" el modulo mas tarde:
   centinela que revienta si alguien intenta ejecutar SQL.
 * **La equivalencia con el historial de ventas** (contrato de CLI-05): el
   `total_pagado` y el `saldo_pendiente` de este modulo deben coincidir al centavo
-  con los que ya calcula `core_ventas.obtener_ventas_historial`, o la misma venta
+  con los que ya calcula `core_historial.obtener_ventas_historial`, o la misma venta
   se veria con dos cifras distintas segun la pantalla.
 """
 
@@ -27,6 +27,7 @@ from typing import Any, cast
 import pytest
 
 import core_pagos
+import core_historial
 import core_ventas
 import db
 from core_comun import CoreError
@@ -513,7 +514,7 @@ def test_pagos_coinciden_con_el_historial_de_ventas(conn: sqlite3.Connection) ->
     core_pagos.agregar_pago(conn, "venta_pagos", venta_id, FORMA_B, 100.05)
 
     # Act
-    fila = core_ventas.obtener_ventas_historial(conn)[0]
+    fila = core_historial.obtener_ventas_historial(conn)[0]
 
     # Assert
     assert core_pagos.total_pagado(conn, "venta_pagos", venta_id) == fila["total_pagado"]

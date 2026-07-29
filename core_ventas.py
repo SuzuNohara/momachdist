@@ -1,4 +1,4 @@
-"""Dominio de ventas: canasta multi-producto atomica e historial (CLI-02, CLI-05).
+"""Dominio de ventas: la canasta multi-producto atomica (CLI-02).
 
 Sustituye la venta mono-producto de la epoca Excel por una **canasta**: la GUI
 arma una lista de lineas `{codigo, cantidad, precio_publico}` y `registrar_venta`
@@ -13,8 +13,9 @@ Decisiones que conviene no re-descubrir:
   dos lineas del mismo producto no pueden sobrevender, y ademas evita el
   anti-patron N+1 (una sola consulta con `IN` para toda la canasta).
 * Los pagos son de otro dominio (`venta_pagos`): aqui solo se crean `ventas` y
-  `venta_detalle`. El historial si **lee** los pagos, con una subconsulta
-  agregada dentro de la misma consulta unica.
+  `venta_detalle`.
+* La **lectura** del historial vive en `core_historial`, separada cuando este
+  modulo supero las 400 lineas de `.langs/python.md` §3.
 
 Grafo de imports: solo `core_comun` y la stdlib, de modo que la fachada `core`
 puede re-exportar este modulo sin ciclos.
@@ -26,16 +27,6 @@ import sqlite3
 from typing import Any, Final
 
 from core_comun import CoreError, _texto
-
-#: Claves de cada fila del historial, en el orden del contrato que lee la GUI.
-CAMPOS_HISTORIAL: Final[tuple[str, ...]] = (
-    "venta_id", "fecha", "cliente", "codigo", "descripcion", "cantidad",
-    "precio_costo", "precio_publico", "total", "ganancia", "total_venta",
-    "num_productos", "total_pagado", "saldo_pendiente",
-)
-
-#: Nombre que toma una venta sin cliente registrado (venta de mostrador).
-CLIENTE_MOSTRADOR: Final[str] = "Mostrador"
 
 _MSG_CANASTA_VACIA: Final[str] = "La venta no tiene lineas: agrega al menos un producto."
 _MSG_LINEA_INVALIDA: Final[str] = "Cada linea de la venta debe ser un diccionario."
@@ -60,31 +51,6 @@ _SQL_INSERT_DETALLE: Final[str] = (
     "INSERT INTO venta_detalle (venta_id, codigo_articulo, cantidad, precio_costo, "
     "precio_publico, total, ganancia) VALUES (?, ?, ?, ?, ?, ?, ?)"
 )
-
-#: Historial completo en **una sola consulta** (CLI-05 R5): el nombre del cliente
-#: sale de un `LEFT JOIN` y los tres agregados por venta de subconsultas
-#: correlacionadas, de modo que no hay ninguna lectura por fila (sin N+1).
-_SQL_HISTORIAL: Final[str] = """
-SELECT
-    v.id AS venta_id,
-    v.fecha AS fecha,
-    COALESCE(c.nombre, 'Mostrador') AS cliente,
-    d.codigo_articulo AS codigo,
-    COALESCE(p.descripcion, d.codigo_articulo) AS descripcion,
-    d.cantidad, d.precio_costo, d.precio_publico, d.total, d.ganancia,
-    (SELECT COALESCE(SUM(d2.total), 0) FROM venta_detalle d2
-      WHERE d2.venta_id = v.id) AS total_venta,
-    (SELECT COUNT(*) FROM venta_detalle d3
-      WHERE d3.venta_id = v.id) AS num_productos,
-    (SELECT COALESCE(SUM(pg.monto), 0) FROM venta_pagos pg
-      WHERE pg.venta_id = v.id) AS total_pagado
-FROM ventas v
-JOIN venta_detalle d ON d.venta_id = v.id
-LEFT JOIN clientes c ON c.id = v.cliente_id
-LEFT JOIN productos p ON p.codigo_articulo = d.codigo_articulo
-ORDER BY v.fecha DESC, v.id DESC
-"""
-
 
 class VentaError(CoreError):
     """Error de dominio del registro y la consulta de ventas."""
@@ -258,30 +224,73 @@ def _calcular_canasta(
     return calculadas
 
 
+def insertar_venta_en_transaccion(
+    conn: sqlite3.Connection,
+    cliente_id: int | None,
+    observaciones: str,
+    lineas: list[dict[str, Any]],
+) -> int:
+    """Inserta encabezado y detalle **sin** abrir transaccion propia (R9, R10).
+
+    Es la variante componible: el limite transaccional lo gobierna el llamador.
+    `registrar_venta` la envuelve en su `with conn:`; ENC-03 la reusa dentro del
+    suyo para que insertar la venta y traspasar los anticipos del encargo sean
+    una sola operacion atomica.
+
+    Existe por el hallazgo H1 del spike ENC-01: la version que abria y cerraba su
+    propia transaccion no se podia componer, de modo que un fallo posterior al
+    insert dejaba la venta ya committeada -- exactamente el commit parcial que
+    define el riesgo RT-2. Duplicar este SQL en `core_encargos` habria sido la
+    otra salida, y las dos copias habrian divergido.
+
+    Un `cliente_id` inexistente levanta `sqlite3.IntegrityError` (la FK esta
+    activa por `db.get_conn`) y se traduce a `VentaError` aqui mismo, para que el
+    llamador reciba siempre un error de dominio.
+
+    Args:
+        conn: conexion inyectada; el llamador ya abrio la transaccion.
+        cliente_id: cliente de la venta, o `None` para mostrador.
+        observaciones: texto libre de la cabecera.
+        lineas: lineas ya validadas y calculadas.
+
+    Returns:
+        El `ventas.id` recien creado.
+
+    Raises:
+        VentaError: si el cliente no existe o SQLite rechaza la escritura.
+
+    Time: O(n) sobre el numero de lineas | Space: O(n)
+    """
+    try:
+        cursor = conn.execute(_SQL_INSERT_VENTA, (cliente_id, observaciones))
+    except sqlite3.IntegrityError as exc:
+        raise VentaError(_MSG_CLIENTE_INEXISTENTE) from exc
+    venta_id = int(cursor.lastrowid or 0)
+    filas = [
+        (venta_id, linea["codigo"], linea["cantidad"], linea["precio_costo"],
+         linea["precio_publico"], linea["total"], linea["ganancia"])
+        for linea in lineas
+    ]
+    conn.executemany(_SQL_INSERT_DETALLE, filas)
+    return venta_id
+
+
 def _insertar_venta(conn: sqlite3.Connection, cliente_id: int | None,
                     observaciones: str, lineas: list[dict[str, Any]]) -> int:
-    """Inserta encabezado y detalle dentro de una unica transaccion (R9, R10).
+    """Inserta la venta abriendo su propia transaccion (R9, R10).
 
     El `with conn:` hace commit al salir y rollback ante cualquier excepcion, de
-    modo que nunca queda media canasta registrada. Un `cliente_id` inexistente
-    levanta `sqlite3.IntegrityError` (la FK esta activa por `db.get_conn`) y se
-    traduce a `VentaError`, igual que cualquier otro fallo de escritura.
+    modo que nunca queda media canasta registrada. Es lo que necesita
+    `registrar_venta`, que es la entrada autonoma; quien ya tenga una transaccion
+    abierta debe usar `insertar_venta_en_transaccion`.
 
     Time: O(n) sobre el numero de lineas | Space: O(n)
     """
     try:
         with conn:
-            try:
-                cursor = conn.execute(_SQL_INSERT_VENTA, (cliente_id, observaciones))
-            except sqlite3.IntegrityError as exc:
-                raise VentaError(_MSG_CLIENTE_INEXISTENTE) from exc
-            venta_id = int(cursor.lastrowid or 0)
-            filas = [
-                (venta_id, linea["codigo"], linea["cantidad"], linea["precio_costo"],
-                 linea["precio_publico"], linea["total"], linea["ganancia"])
-                for linea in lineas
-            ]
-            conn.executemany(_SQL_INSERT_DETALLE, filas)
+            venta_id = insertar_venta_en_transaccion(
+                conn, cliente_id, observaciones, lineas
+            )
     except sqlite3.Error as exc:
         raise VentaError(f"No se pudo registrar la venta: {exc}") from exc
     return venta_id
@@ -345,50 +354,3 @@ def registrar_venta(conn: sqlite3.Connection, cliente_id: int | None,
     return _construir_resumen(venta_id, cliente_id, calculadas, datos)
 
 
-def _fila_historial(fila: sqlite3.Row) -> dict[str, Any]:
-    """Mapea una fila cruda del historial al contrato de `CAMPOS_HISTORIAL`.
-
-    `saldo_pendiente` se deriva aqui para redondear una sola vez, con la misma
-    semantica que debera adoptar el registro de pagos (CLI-03).
-    Time: O(1) | Space: O(1)
-    """
-    total_venta = round(float(fila["total_venta"]), 2)
-    total_pagado = round(float(fila["total_pagado"]), 2)
-    return {
-        "venta_id": int(fila["venta_id"]),
-        "fecha": fila["fecha"],
-        "cliente": fila["cliente"],
-        "codigo": fila["codigo"],
-        "descripcion": fila["descripcion"],
-        "cantidad": int(fila["cantidad"]),
-        "precio_costo": float(fila["precio_costo"]),
-        "precio_publico": float(fila["precio_publico"]),
-        "total": float(fila["total"]),
-        "ganancia": float(fila["ganancia"]),
-        "total_venta": total_venta,
-        "num_productos": int(fila["num_productos"]),
-        "total_pagado": total_pagado,
-        "saldo_pendiente": round(total_venta - total_pagado, 2),
-    }
-
-
-def obtener_ventas_historial(conn: sqlite3.Connection) -> list[dict]:
-    """Historial de ventas: una fila por linea vendida (R15, CLI-05 R1-R7).
-
-    Cada fila trae el detalle de la linea, el nombre del cliente (`'Mostrador'`
-    cuando la venta no tiene cliente) y tres agregados por venta --`total_venta`,
-    `num_productos` y `total_pagado`-- de los que sale `saldo_pendiente`. Todo se
-    resuelve en **una sola consulta**: no hay lecturas por fila. Orden
-    `fecha DESC, venta_id DESC`, de modo que lo mas reciente queda arriba y las
-    lineas de una misma venta quedan contiguas. Base sin ventas -> lista vacia.
-
-    Devuelve una lista de diccionarios con las claves de `CAMPOS_HISTORIAL`, y
-    levanta `VentaError` si la consulta falla.
-
-    Time: O(n log n) por el ORDER BY | Space: O(n)
-    """
-    try:
-        filas = conn.execute(_SQL_HISTORIAL).fetchall()
-    except sqlite3.Error as exc:
-        raise VentaError(f"No se pudo leer el historial de ventas: {exc}") from exc
-    return [_fila_historial(fila) for fila in filas]

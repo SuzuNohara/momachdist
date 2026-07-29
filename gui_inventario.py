@@ -55,6 +55,35 @@ LARGO_FECHA: Final[int] = 10
 # desincronizarse; el resto de dominios (venta, encargo) pasan la suya.
 TABLA_PAGOS_ENTREGA: Final[str] = "entrega_pagos"
 
+# Clave de `core.PAGO_TABLAS` que le corresponde al anticipo de un encargo
+# (ENC-02 R13). El anticipo es un pago mas: lo captura `VentanaPagos`, el mismo
+# dialogo agnostico que ya sirve a la venta y a la entrega (ADR-6).
+TABLA_PAGOS_ENCARGO: Final[str] = "encargo_pagos"
+
+# Entrada del filtro de la pestana de Encargos que significa "sin filtrar".
+# `core.listar_encargos` espera `None` para eso, y esta etiqueta es lo que se
+# traduce a `None`; no puede colisionar con un status porque no es uno.
+FILTRO_TODOS: Final[str] = "Todos"
+
+# Opciones del filtro de status, derivadas de `core.STATUS_VALIDOS` -- que es el
+# espejo del CHECK del esquema -- y ordenadas para que el combo sea estable.
+STATUS_ENCARGO_ORDEN: Final[tuple[str, ...]] = tuple(sorted(core.STATUS_VALIDOS))
+
+# Unico status desde el que la capa core admite editar, cancelar o surtir. Se
+# declara aqui como literal porque la fachada expone el conjunto completo
+# (`STATUS_VALIDOS`) pero no cada valor suelto; el combo de arriba sigue saliendo
+# del conjunto, asi que un status nuevo aparece en el filtro sin tocar nada.
+STATUS_ENCARGO_PENDIENTE: Final[str] = "Pendiente"
+
+# Placeholder del combo de cliente del encargo. `encargos.cliente_id` es NOT
+# NULL: a diferencia de la venta, "sin cliente" no es un encargo valido, asi que
+# esta entrada no mapea a ningun id y el guardado la rechaza (R12).
+SIN_CLIENTE: Final[str] = "— Elige un cliente —"
+
+# Texto de la cabecera de puntos del dashboard cuando el catalogo esta vacio
+# (BW-03 R6): `resumen_puntos` responde con la semana en blanco, no lanza.
+SIN_SEMANAS: Final[str] = "Todavía no hay semanas con puntos registrados."
+
 # Color de fila por status de entrega. Deriva de `core.ENTREGA_STATUS_VALIDOS`,
 # que es el espejo del CHECK del esquema: un status nuevo en la capa core cae al
 # tag neutro en vez de romper el pintado.
@@ -158,6 +187,7 @@ class App(tk.Tk):
         self.tab_entregas = TabEntregas(self.notebook, self)
         self.tab_asociados = TabAsociados(self.notebook, self)
         self.tab_clientes = TabClientes(self.notebook, self)
+        self.tab_encargos = TabEncargos(self.notebook, self)
 
         self.notebook.add(self.tab_dashboard, text="  📊 Dashboard  ")
         self.notebook.add(self.tab_inventario, text="  📦 Inventario  ")
@@ -166,6 +196,7 @@ class App(tk.Tk):
         self.notebook.add(self.tab_entregas, text="  🤝 Entregas Asociado  ")
         self.notebook.add(self.tab_asociados, text="  👥 Asociados  ")
         self.notebook.add(self.tab_clientes, text="  👥 Clientes  ")
+        self.notebook.add(self.tab_encargos, text="  📝 Encargos  ")
 
         self.status_bar = tk.Label(
             self, text="", font=("Arial", 9), bg="#F5F5F5", fg="#444444",
@@ -208,11 +239,27 @@ class App(tk.Tk):
             command=self.refrescar_todo, highlightthickness=0, bd=0,
         ).pack(side="left", padx=8, pady=10)
 
+        self._construir_acciones_archivo(barra)
+
+    def _construir_acciones_archivo(self, barra) -> None:
+        """Acciones de archivo de la barra: exportar y abrir el Excel (CLI-06).
+
+        Viven en su propio helper para que la barra no supere el limite de
+        longitud de `.langs/python.md` §3 al crecer.
+
+        Time: O(1) | Space: O(1)
+        """
         tk.Button(
             barra, text="📁 Abrir Excel", font=("Arial", 10),
             bg=COLOR_MARCA, fg="white", relief="flat", padx=12, pady=6,
             command=self.abrir_excel, highlightthickness=0, bd=0,
         ).pack(side="right", padx=12, pady=10)
+
+        tk.Button(
+            barra, text="📤 Exportar a Excel", font=("Arial", 10),
+            bg=COLOR_MARCA, fg="white", relief="flat", padx=12, pady=6,
+            command=self.exportar_a_excel, highlightthickness=0, bd=0,
+        ).pack(side="right", padx=4, pady=10)
 
     # ------------------------------------------------------------------
     # Acciones centrales (usadas por varias pestanas)
@@ -229,6 +276,7 @@ class App(tk.Tk):
         self.tab_entregas.refrescar()
         self.tab_asociados.refrescar()
         self.tab_clientes.refrescar()
+        self.tab_encargos.refrescar()
 
     def abrir_flujo_carga_pdf(self):
         archivos = filedialog.askopenfilenames(
@@ -383,6 +431,40 @@ class App(tk.Tk):
         """
         VentanaVenta(self, codigo_preseleccionado=codigo_preseleccionado)
 
+    def exportar_a_excel(self) -> None:
+        """Genera el reporte `.xlsx` en la ruta que elija la usuaria (CLI-06).
+
+        El dialogo es la unica decision que se toma aqui: el contenido del libro
+        --sus dos hojas y su formato-- lo arma `core.exportar_a_excel`, que lee
+        por la capa core y nunca por SQL propio (ADR-2). Cancelar el dialogo
+        devuelve cadena vacia y no escribe nada.
+
+        `ExportError` --el fallo de escritura ya envuelto-- hereda de
+        `core.CoreError`, asi que ese es el error de dominio que se captura;
+        `OSError` cubre el fallo crudo del sistema de archivos que pudiera
+        escapar sin envolver. Nunca se captura `Exception`
+        (`.langs/python.md` §6).
+
+        Time: O(f * c) sobre filas y columnas del reporte | Space: O(f * c)
+        """
+        ruta = filedialog.asksaveasfilename(
+            title="Guardar la exportación como",
+            defaultextension=".xlsx",
+            filetypes=[("Libro de Excel", "*.xlsx")],
+        )
+        if not ruta:
+            return
+
+        try:
+            destino = core.exportar_a_excel(self.conn, ruta)
+        except (core.CoreError, OSError) as e:
+            logger.exception("Fallo la exportacion a Excel en %s", ruta)
+            messagebox.showerror(APP_TITLE, f"No se pudo exportar:\n{e}")
+            return
+
+        self.mostrar_status(f"Exportación generada en {destino}")
+        messagebox.showinfo(APP_TITLE, f"La exportación se guardó en:\n{destino}")
+
     def abrir_excel(self):
         if not os.path.exists(EXCEL_PATH):
             messagebox.showinfo(
@@ -432,6 +514,42 @@ class TabDashboard(ttk.Frame):
         self.tree_bajo_stock.column("disponibles", width=140, anchor="center")
         self.tree_bajo_stock.pack(fill="both", expand=True)
 
+        self._crear_seccion_puntos()
+
+    def _crear_seccion_puntos(self) -> None:
+        """Seccion "Puntos Betterware por semana" del dashboard (BW-03 R5, R6).
+
+        Solo monta los widgets; el poblado es de `_refrescar_puntos`, que corre
+        dentro de `refrescar` como el resto del tablero.
+
+        Time: O(1) | Space: O(1)
+        """
+        tk.Label(
+            self, text="Puntos Betterware por semana",
+            font=("Arial", 12, "bold"), fg=COLOR_AZUL,
+        ).pack(pady=(10, 5))
+
+        self.lbl_puntos_ultima = tk.Label(
+            self, text=SIN_SEMANAS, font=("Arial", 10), fg="#444444",
+        )
+        self.lbl_puntos_ultima.pack(pady=(0, 5))
+
+        marco = tk.Frame(self)
+        marco.pack(fill="both", expand=True, padx=30, pady=(0, 20))
+
+        self.tree_puntos = ttk.Treeview(
+            marco, columns=("semana", "puntos"), show="headings", height=6
+        )
+        self.tree_puntos.heading("semana", text="Semana")
+        self.tree_puntos.heading("puntos", text="Puntos acumulados")
+        self.tree_puntos.column("semana", width=180, anchor="center")
+        self.tree_puntos.column("puntos", width=180, anchor="center")
+
+        scrollbar = ttk.Scrollbar(marco, orient="vertical", command=self.tree_puntos.yview)
+        self.tree_puntos.configure(yscrollcommand=scrollbar.set)
+        self.tree_puntos.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
     def _crear_tarjetas(self):
         datos = [
             ("piezas_disponibles", "Piezas en stock"),
@@ -465,6 +583,39 @@ class TabDashboard(ttk.Frame):
         for prod in resumen.get("productos_bajo_stock", []):
             self.tree_bajo_stock.insert("", "end", values=(
                 prod["Codigo articulo"], prod["Descripcion"], int(prod["Piezas disponibles"])
+            ))
+
+        self._refrescar_puntos()
+
+    def _refrescar_puntos(self) -> None:
+        """Repuebla la serie de puntos Betterware del dashboard (BW-03 R5, R6).
+
+        `core.obtener_puntos_por_semana` entrega la serie en orden **ascendente**
+        porque su contrato se penso para graficar de izquierda a derecha; la
+        tabla se lee al reves, asi que la inversion ocurre **aqui** y no se le
+        pide otro orden al core: una sola fuente, dos presentaciones.
+
+        La cabecera sale de `core.resumen_puntos`, que resuelve la ultima semana
+        con una sola consulta en vez de quedarse con el ultimo elemento de la
+        serie, y devuelve un resumen neutro con el catalogo vacio.
+
+        Time: O(n) sobre las semanas del catalogo | Space: O(n)
+        """
+        resumen = core.resumen_puntos(self.app.conn)
+        ultima = str(resumen.get("ultima_semana", "") or "")
+        puntos_ultima = int(resumen.get("puntos_ultima", 0) or 0)
+        self.lbl_puntos_ultima.config(
+            text=(
+                f"Última semana: {ultima} — {puntos_ultima:,} puntos acumulados"
+                if ultima
+                else SIN_SEMANAS
+            )
+        )
+
+        self.tree_puntos.delete(*self.tree_puntos.get_children())
+        for fila in reversed(core.obtener_puntos_por_semana(self.app.conn)):
+            self.tree_puntos.insert("", "end", values=(
+                str(fila["semana_texto"]), f"{int(fila['puntos']):,}",
             ))
 
 
@@ -1475,6 +1626,843 @@ class VentanaClienteForm(tk.Toplevel):
 
         self.app.refrescar_todo()
         self.destroy()
+
+
+# ======================================================================
+# Pestana: Encargos (pedidos especiales de cliente)
+# ======================================================================
+
+class TabEncargos(ttk.Frame):
+    """Encargos de cliente leidos de SQLite (ENC-02 R14, ENC-04 R4-R10).
+
+    El `iid` de cada fila es el `encargos.id` real, de modo que la seleccion se
+    traduce a clave primaria sin depender del orden del listado.
+
+    **El boton Surtir es comodidad, no autoridad.** `core.encargo_surtible` solo
+    decide si se pinta habilitado; la validacion que cuenta es la de
+    `core.surtir_encargo`, que revalida estado y stock dentro de su transaccion.
+    Si el stock se agota entre el refresco y el clic, el rechazo llega como
+    `VentaError` y se muestra tal cual (ENC-04 R7): la logica de stock no se
+    replica aqui.
+
+    `saldo_estimado` se calcula restando los dos totales que ya trae
+    `listar_encargos` (R9), sin una sola lectura por fila.
+    """
+
+    COLUMNAS: Final[tuple[str, ...]] = (
+        "cliente", "fecha", "status", "total_estimado", "total_anticipado",
+        "saldo_estimado",
+    )
+
+    TITULOS: Final[dict[str, str]] = {
+        "cliente": "Cliente", "fecha": "Fecha", "status": "Status",
+        "total_estimado": "Total estimado", "total_anticipado": "Anticipo",
+        "saldo_estimado": "Saldo estimado",
+    }
+
+    ANCHOS: Final[dict[str, int]] = {
+        "cliente": 220, "fecha": 110, "status": 120,
+        "total_estimado": 120, "total_anticipado": 110, "saldo_estimado": 120,
+    }
+
+    def __init__(self, notebook, app) -> None:
+        super().__init__(notebook)
+        self.app = app
+        # Cache del ultimo listado indexado por id: resuelve la fila
+        # seleccionada sin releer la base (anti N+1, `.langs/python.md` §4).
+        self.encargos: dict[int, dict] = {}
+        self.botones: dict[str, tk.Button] = {}
+
+        self._construir_barra()
+        self._construir_tabla()
+        self._actualizar_acciones()
+
+    def _construir_barra(self) -> None:
+        """Filtro de status y las cinco acciones sobre el encargo elegido.
+
+        Surtir (ENC-04 R4) se agrega **junto a** los controles de ENC-02, que
+        siguen enteros: la conversion es una accion mas del mismo encargo.
+
+        Time: O(s) sobre los status validos | Space: O(s)
+        """
+        barra = tk.Frame(self)
+        barra.pack(fill="x", padx=15, pady=(15, 5))
+
+        tk.Label(barra, text="Status:", font=("Arial", 10)).pack(side="left", padx=(0, 6))
+
+        self.filtro_var = tk.StringVar(value=FILTRO_TODOS)
+        self.combo_filtro = ttk.Combobox(
+            barra, textvariable=self.filtro_var, state="readonly", width=14,
+            values=[FILTRO_TODOS, *STATUS_ENCARGO_ORDEN], font=("Arial", 10),
+        )
+        self.combo_filtro.pack(side="left", padx=(0, 12))
+        self.combo_filtro.bind("<<ComboboxSelected>>", lambda _evento: self.refrescar())
+
+        acciones = (
+            ("nuevo", "➕ Nuevo", self._nuevo, COLOR_MARCA),
+            ("editar", "✏️ Editar", self._editar, None),
+            ("cancelar", "🚫 Cancelar", self._cancelar, None),
+            ("anticipo", "💵 Anticipo", self._anticipo, None),
+            ("surtir", "✅ Surtir", self._surtir, COLOR_ROSA),
+        )
+        for clave, texto, comando, fondo in acciones:
+            self.botones[clave] = self._boton(barra, texto, comando, fondo)
+
+    def _boton(self, barra, texto: str, comando, fondo: str | None) -> tk.Button:
+        """Boton de la barra, ya empaquetado; `fondo` lo destaca si no es `None`.
+
+        Time: O(1) | Space: O(1)
+        """
+        boton = tk.Button(
+            barra, text=texto, font=("Arial", 10, "bold" if fondo else "normal"),
+            bg=fondo or "#EEEEEE", fg="white" if fondo else "black",
+            relief="flat", padx=12, pady=6, command=comando,
+        )
+        boton.pack(side="left", padx=4)
+        return boton
+
+    def _construir_tabla(self) -> None:
+        """Treeview de encargos, con el saldo estimado a la vista (R9).
+
+        Time: O(c) sobre las columnas | Space: O(1)
+        """
+        frame_tabla = tk.Frame(self)
+        frame_tabla.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+
+        self.tree = ttk.Treeview(
+            frame_tabla, columns=self.COLUMNAS, show="headings", height=18
+        )
+        for col in self.COLUMNAS:
+            self.tree.heading(col, text=self.TITULOS[col])
+            self.tree.column(
+                col, width=self.ANCHOS[col],
+                anchor="w" if col == "cliente" else "center",
+            )
+
+        scrollbar = ttk.Scrollbar(frame_tabla, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        self.tree.bind("<<TreeviewSelect>>", self._actualizar_acciones)
+
+    def _filtro(self) -> str | None:
+        """Status seleccionado en el combo, o `None` si no se filtra.
+
+        Time: O(1) | Space: O(1)
+        """
+        valor = self.filtro_var.get()
+        return None if valor == FILTRO_TODOS else valor
+
+    def refrescar(self) -> None:
+        """Repuebla la tabla desde `core.listar_encargos` (R14, R9).
+
+        Una sola consulta pinta la pestana entera: `listar_encargos` ya trae el
+        nombre del cliente y los dos totales agregados, asi que aqui no hay
+        ninguna lectura por fila -- el saldo estimado es una resta local.
+
+        Al terminar se reevaluan las acciones (ENC-04 R5): un refresco puede
+        haber dejado obsoleto el estado del boton Surtir.
+
+        Time: O(n) sobre los encargos | Space: O(n)
+        """
+        self.tree.delete(*self.tree.get_children())
+        try:
+            encargos = core.listar_encargos(self.app.conn, self._filtro())
+        except core.EncargoError as e:
+            logger.exception("Fallo la lectura de los encargos")
+            messagebox.showerror(APP_TITLE, f"No se pudieron leer los encargos:\n{e}")
+            self.encargos = {}
+            self._actualizar_acciones()
+            return
+
+        self.encargos = {int(encargo["id"]): encargo for encargo in encargos}
+        for encargo in encargos:
+            self.tree.insert(
+                "", "end", iid=str(encargo["id"]), values=self._fila_visible(encargo)
+            )
+        self._actualizar_acciones()
+
+    def _fila_visible(self, encargo: dict) -> tuple:
+        """Valores de una fila, con el saldo estimado ya restado (ENC-04 R9).
+
+        Time: O(1) | Space: O(1)
+        """
+        estimado = float(encargo["total_estimado"] or 0)
+        anticipado = float(encargo["total_anticipado"] or 0)
+        return (
+            encargo["cliente_nombre"] or "",
+            str(encargo["fecha_encargo"] or "")[:LARGO_FECHA],
+            encargo["status"],
+            f"${estimado:.2f}",
+            f"${anticipado:.2f}",
+            f"${estimado - anticipado:.2f}",
+        )
+
+    def _seleccionado(self) -> dict | None:
+        """Encargo de la fila seleccionada, o `None` si no hay exactamente una.
+
+        No avisa por dialogo: la usan tanto los handlers --que si avisan, via
+        `_id_seleccionado`-- como `_actualizar_acciones`, que corre en cada
+        cambio de seleccion y no puede abrir ventanas.
+
+        Time: O(1) | Space: O(1)
+        """
+        seleccion = self.tree.selection()
+        if len(seleccion) != 1:
+            return None
+        return self.encargos.get(int(seleccion[0]))
+
+    def _id_seleccionado(self) -> int | None:
+        """`encargos.id` de la fila seleccionada, avisando si no hay ninguna.
+
+        Time: O(1) | Space: O(1)
+        """
+        encargo = self._seleccionado()
+        if encargo is None:
+            messagebox.showinfo(APP_TITLE, "Primero selecciona un encargo de la lista.")
+            return None
+        return int(encargo["id"])
+
+    def _actualizar_acciones(self, evento=None) -> None:
+        """Habilita cada accion segun la seleccion vigente (ENC-04 R5, R10).
+
+        Surtir queda `normal` solo con **un** encargo seleccionado que
+        `core.encargo_surtible` acepte; cualquier otro caso lo deja `disabled`,
+        incluidos los status ya cerrados (R8), que esa funcion rechaza sin
+        evaluar stock. Cancelar solo se habilita sobre un `Pendiente` (R10).
+
+        Corre en cada cambio de seleccion y al final de `refrescar`, asi que su
+        consulta es O(k) sobre las lineas de **un** encargo, no del listado.
+
+        Time: O(k log n) sobre las lineas del encargo | Space: O(1)
+        """
+        encargo = self._seleccionado()
+        hay_uno = encargo is not None
+        pendiente = hay_uno and str(encargo["status"]) == STATUS_ENCARGO_PENDIENTE
+        surtible = hay_uno and core.encargo_surtible(self.app.conn, int(encargo["id"]))
+
+        # `editar` queda abierto a proposito: `core.editar_encargo` exige
+        # `Pendiente` y rechaza el resto con `EncargoError`, asi que la usuaria
+        # recibe una explicacion en vez de un boton gris sin motivo.
+        #
+        # `anticipo` NO puede seguir esa logica: `core_pagos.agregar_pago` valida
+        # tabla, forma, monto y FK, pero **no mira el status del encargo padre**,
+        # de modo que un abono contra un encargo `Cancelado` o `Entregado` se
+        # escribiria sin que nadie lo rechace -- no habria error que mostrar.
+        # Hasta que la capa de pagos valide el estado del padre (DEUDA-09), la
+        # unica barrera es esta.
+        for clave, activo in (
+            ("editar", hay_uno),
+            ("anticipo", pendiente),
+            ("cancelar", pendiente),
+            ("surtir", surtible),
+        ):
+            self.botones[clave].config(state="normal" if activo else "disabled")
+
+    def _refrescar_app(self) -> None:
+        """Repinta esta pestana y despues el resto de la app.
+
+        El orden importa: `refrescar_todo` recorre todas las pestanas, pero un
+        encargo surtido o cancelado tiene que verse aqui aunque el call-site sea
+        un doble de `App` que no repinte nada.
+
+        Time: O(n) sobre los encargos | Space: O(n)
+        """
+        self.refrescar()
+        self.app.refrescar_todo()
+
+    def _nuevo(self) -> None:
+        VentanaEncargoForm(self.app, modo="agregar")
+
+    def _editar(self) -> None:
+        """Abre el formulario precargado con el detalle del encargo (R11).
+
+        El detalle no esta en el listado --`listar_encargos` no trae lineas--,
+        asi que se pide con `obtener_encargo`; un encargo que ya no existe llega
+        como `EncargoError` y se muestra por dialogo (R15).
+
+        Time: O(k) sobre las lineas del encargo | Space: O(k)
+        """
+        encargo_id = self._id_seleccionado()
+        if encargo_id is None:
+            return
+
+        try:
+            datos = core.obtener_encargo(self.app.conn, encargo_id)
+        except core.EncargoError as e:
+            logger.exception("Fallo la lectura del encargo %s", encargo_id)
+            messagebox.showerror(APP_TITLE, f"No se pudo abrir el encargo:\n{e}")
+            return
+
+        VentanaEncargoForm(self.app, modo="editar", encargo_id=encargo_id, datos=datos)
+
+    def _cancelar(self) -> None:
+        """Cancela el encargo seleccionado por la capa core (ENC-04 R10, R15).
+
+        No reimplementa nada: enruta al `cancelar_encargo` de ENC-02, que exige
+        `Pendiente`. El boton ya filtra ese caso, pero la habilitacion puede
+        quedar obsoleta si el status cambio desde otro punto de la app; entonces
+        el core rechaza y el mensaje sale por dialogo en vez de propagarse.
+
+        Time: O(log n) | Space: O(1)
+        """
+        encargo_id = self._id_seleccionado()
+        if encargo_id is None:
+            return
+        if not messagebox.askyesno(APP_TITLE, "¿Cancelar este encargo?"):
+            return
+
+        try:
+            core.cancelar_encargo(self.app.conn, encargo_id)
+        except core.EncargoError as e:
+            logger.exception("Fallo la cancelacion del encargo %s", encargo_id)
+            messagebox.showerror(APP_TITLE, f"No se pudo cancelar el encargo:\n{e}")
+            return
+
+        self._refrescar_app()
+
+    def _anticipo(self) -> None:
+        """Abre los anticipos del encargo en el dialogo compartido (R13).
+
+        Time: O(1) | Space: O(1)
+        """
+        encargo = self._seleccionado()
+        if encargo is None:
+            messagebox.showinfo(APP_TITLE, "Primero selecciona un encargo de la lista.")
+            return
+
+        encargo_id = int(encargo["id"])
+        VentanaPagos(
+            self.app,
+            TABLA_PAGOS_ENCARGO,
+            encargo_id,
+            float(encargo["total_estimado"] or 0),
+            f"Anticipos del encargo #{encargo_id} — {encargo['cliente_nombre']}",
+        )
+
+    def _surtir(self) -> None:
+        """Convierte el encargo seleccionado en venta (ENC-04 R6, R7, R8).
+
+        La conversion entera vive en `core.surtir_encargo`: una sola llamada
+        escribe la venta, traspasa los anticipos y deja el encargo `Entregado`,
+        o no escribe nada. Aqui solo se enruta el resultado.
+
+        Dos rechazos posibles, ninguno propaga:
+
+        * `VentaError` -- el stock se agoto entre el chequeo del boton y el clic
+          (R7). El encargo queda intacto y el mensaje trae el disponible real.
+        * `EncargoError` -- el encargo ya no esta `Pendiente` o ya se convirtio
+          (R8). El core revalida del lado servidor, asi que una habilitacion
+          obsoleta **no** puede surtir dos veces.
+
+        Time: O(n + m) sobre las lineas del encargo | Space: O(n + m)
+        """
+        encargo_id = self._id_seleccionado()
+        if encargo_id is None:
+            return
+
+        try:
+            resumen = core.surtir_encargo(self.app.conn, encargo_id)
+        except core.VentaError as e:
+            logger.exception("El stock ya no alcanza para surtir el encargo %s", encargo_id)
+            messagebox.showerror(APP_TITLE, f"No se pudo surtir el encargo:\n{e}")
+            return
+        except core.EncargoError as e:
+            logger.exception("Fallo la conversion del encargo %s", encargo_id)
+            messagebox.showerror(APP_TITLE, f"No se pudo surtir el encargo:\n{e}")
+            return
+
+        self._refrescar_app()
+        messagebox.showinfo(
+            APP_TITLE,
+            f"El encargo #{encargo_id} se surtió como la venta "
+            f"#{resumen['venta_id']}.\nTotal: ${float(resumen['total']):.2f}",
+        )
+
+
+# ======================================================================
+# Dialogo: alta/edicion de un encargo
+# ======================================================================
+
+def _etiquetas_cliente_encargo(clientes: list[dict]) -> dict[str, int | None]:
+    """Mapa `etiqueta del combo -> cliente_id` del formulario de encargo (R11).
+
+    Reusa el mapa de la venta y sustituye la venta de mostrador por un
+    placeholder sin id: `encargos.cliente_id` es NOT NULL, asi que "sin cliente"
+    no es un encargo valido y el guardado lo rechaza antes de tocar la base
+    (R12).
+
+    Time: O(n) sobre los clientes | Space: O(n)
+    """
+    etiquetas = _etiquetas_cliente(clientes)
+    etiquetas.pop(core.CLIENTE_MOSTRADOR, None)
+    return {SIN_CLIENTE: None, **etiquetas}
+
+
+class VentanaEncargoForm(tk.Toplevel):
+    """Alta/edicion de un encargo como canasta de articulos (ENC-02 R11-R13).
+
+    El flujo espeja al de la venta: buscar el articulo, capturar cantidad y
+    precio estimado, agregarlo a la canasta, repetir, elegir el cliente y
+    guardar. La canasta entera viaja en **una sola** llamada a
+    `crear_encargo`/`editar_encargo`, que la escriben de forma atomica.
+
+    Aqui no se juzga el stock: un encargo es justamente lo que se pide **sin**
+    tener inventario. La lista de articulos sale de las existencias solo para
+    poder elegir un codigo del catalogo con su descripcion a la vista.
+
+    En modo editar recibe el dict de `core.obtener_encargo` --cabecera mas
+    `lineas`-- y precarga los tres bloques.
+    """
+
+    COLUMNAS: Final[tuple[str, ...]] = (
+        "codigo", "descripcion", "cantidad", "precio", "importe",
+    )
+
+    TITULOS: Final[dict[str, str]] = {
+        "codigo": "Código", "descripcion": "Descripción", "cantidad": "Cant.",
+        "precio": "Precio estimado", "importe": "Importe",
+    }
+
+    ANCHOS: Final[dict[str, int]] = {
+        "codigo": 70, "descripcion": 240, "cantidad": 55, "precio": 110, "importe": 90,
+    }
+
+    def __init__(self, app, modo="agregar", encargo_id=None, datos=None) -> None:
+        super().__init__(app)
+        self.app = app
+        self.modo = modo
+        self.encargo_id = encargo_id
+        self.title("Nuevo encargo" if modo == "agregar" else "Editar encargo")
+        self.geometry("640x780")
+        self.configure(bg="#FFFFFF")
+
+        self.catalogo = core.obtener_existencias(self.app.conn)
+        self.clientes_por_etiqueta = _etiquetas_cliente_encargo(
+            core.listar_clientes(self.app.conn)
+        )
+        self.producto_seleccionado = None
+        # Lineas indexadas por el `iid` de su fila, que es lo unico estable
+        # cuando se quita una linea intermedia.
+        self.lineas_canasta: dict[str, dict] = {}
+        self._contador_linea = 0
+
+        self._construir_interfaz()
+        self._filtrar_lista()
+        self._precargar(datos or {})
+
+    # ------------------------------------------------------------------
+    # Construccion
+    # ------------------------------------------------------------------
+
+    def _construir_interfaz(self) -> None:
+        """Monta las tres zonas: buscador, captura y canasta.
+
+        Time: O(1) | Space: O(1)
+        """
+        tk.Label(
+            self, text=self.title(), font=("Arial", 15, "bold"),
+            bg="#FFFFFF", fg=COLOR_MARCA,
+        ).pack(pady=(15, 10))
+
+        self._construir_buscador()
+        self._construir_formulario()
+        self._construir_canasta()
+
+        tk.Button(
+            self, text="✅  Guardar encargo", font=("Arial", 12, "bold"),
+            bg=COLOR_ROSA, fg="white", activebackground="#b8005f",
+            relief="flat", padx=15, pady=10, command=self._guardar,
+        ).pack(pady=(10, 8))
+
+        self.status_label = tk.Label(
+            self, text="", font=("Arial", 9), bg="#FFFFFF", fg="#CC0000",
+            wraplength=580, justify="left",
+        )
+        self.status_label.pack(fill="x", padx=20, pady=(0, 10))
+
+    def _construir_buscador(self) -> None:
+        """Buscador de articulo por codigo o nombre, sobre el catalogo.
+
+        Time: O(1) | Space: O(1)
+        """
+        tk.Label(
+            self, text="Busca el artículo por código o nombre:", font=("Arial", 10),
+            bg="#FFFFFF", anchor="w",
+        ).pack(fill="x", padx=20)
+
+        self.busqueda_var = tk.StringVar()
+        self.busqueda_var.trace_add("write", lambda *_: self._filtrar_lista())
+        entry = tk.Entry(self, textvariable=self.busqueda_var, font=("Arial", 11))
+        entry.pack(fill="x", padx=20, pady=(0, 10))
+
+        frame_lista = tk.Frame(self, bg="#FFFFFF")
+        frame_lista.pack(fill="both", padx=20)
+        scrollbar = tk.Scrollbar(frame_lista)
+        scrollbar.pack(side="right", fill="y")
+        self.listbox = tk.Listbox(
+            frame_lista, height=6, font=("Arial", 10),
+            yscrollcommand=scrollbar.set, exportselection=False,
+        )
+        self.listbox.pack(side="left", fill="both", expand=True)
+        scrollbar.config(command=self.listbox.yview)
+        self.listbox.bind("<<ListboxSelect>>", self._al_seleccionar)
+
+    def _construir_formulario(self) -> None:
+        """Cantidad, precio estimado, cliente y observaciones (R11, R12).
+
+        Time: O(n) sobre los clientes | Space: O(n)
+        """
+        form = tk.Frame(self, bg="#FFFFFF")
+        form.pack(fill="x", padx=20, pady=(10, 0))
+
+        self._construir_captura(form)
+        self._construir_cabecera(form)
+
+    def _construir_captura(self, form) -> None:
+        """Cantidad, precio estimado y el boton que empuja a la canasta (R12).
+
+        Time: O(1) | Space: O(1)
+        """
+        tk.Label(form, text="Cantidad solicitada:", bg="#FFFFFF", font=("Arial", 10)).grid(
+            row=0, column=0, sticky="w", pady=4
+        )
+        self.cantidad_var = tk.StringVar()
+        tk.Entry(form, textvariable=self.cantidad_var, font=("Arial", 10), width=12).grid(
+            row=0, column=1, sticky="w"
+        )
+
+        tk.Label(form, text="Precio estimado ($):", bg="#FFFFFF", font=("Arial", 10)).grid(
+            row=1, column=0, sticky="w", pady=4
+        )
+        self.precio_var = tk.StringVar()
+        tk.Entry(form, textvariable=self.precio_var, font=("Arial", 10), width=12).grid(
+            row=1, column=1, sticky="w"
+        )
+
+        tk.Button(
+            form, text="➕ Agregar a la canasta", font=("Arial", 10, "bold"),
+            bg=COLOR_MARCA, fg="white", relief="flat", padx=10, pady=4,
+            command=self._agregar_linea,
+        ).grid(row=0, column=2, rowspan=2, padx=15)
+
+    def _construir_cabecera(self, form) -> None:
+        """Cliente del encargo y observaciones (R11).
+
+        Time: O(n) sobre los clientes | Space: O(n)
+        """
+        tk.Label(form, text="Cliente:", bg="#FFFFFF", font=("Arial", 10)).grid(
+            row=2, column=0, sticky="w", pady=4
+        )
+        self.cliente_var = tk.StringVar(value=SIN_CLIENTE)
+        self.combo_cliente = ttk.Combobox(
+            form, textvariable=self.cliente_var, state="readonly", width=30,
+            values=list(self.clientes_por_etiqueta),
+        )
+        self.combo_cliente.grid(row=2, column=1, columnspan=2, sticky="w")
+
+        tk.Label(form, text="Observaciones:", bg="#FFFFFF", font=("Arial", 10)).grid(
+            row=3, column=0, sticky="nw", pady=4
+        )
+        self.obs_text = tk.Text(form, font=("Arial", 10), width=36, height=2)
+        self.obs_text.grid(row=3, column=1, columnspan=2, sticky="w")
+
+    def _construir_canasta(self) -> None:
+        """Tabla de la canasta y el boton que quita la linea seleccionada (R12).
+
+        Time: O(c) sobre las columnas | Space: O(1)
+        """
+        cabecera = tk.Frame(self, bg="#FFFFFF")
+        cabecera.pack(fill="x", padx=20, pady=(12, 4))
+        tk.Label(
+            cabecera, text="Artículos del encargo:", bg="#FFFFFF",
+            font=("Arial", 10, "bold"),
+        ).pack(side="left")
+        tk.Button(
+            cabecera, text="🗑️ Quitar línea", font=("Arial", 9),
+            bg="#EEEEEE", relief="flat", padx=10, pady=3, command=self._quitar_linea,
+        ).pack(side="right")
+
+        marco = tk.Frame(self, bg="#FFFFFF")
+        marco.pack(fill="both", padx=20)
+
+        self.tree_canasta = ttk.Treeview(
+            marco, columns=self.COLUMNAS, show="headings", height=6
+        )
+        for col in self.COLUMNAS:
+            self.tree_canasta.heading(col, text=self.TITULOS[col])
+            self.tree_canasta.column(
+                col, width=self.ANCHOS[col],
+                anchor="w" if col == "descripcion" else "center",
+            )
+        self.tree_canasta.pack(fill="both", expand=True)
+
+    def _precargar(self, datos: dict) -> None:
+        """Vuelca el encargo existente en los tres bloques del dialogo (R11).
+
+        Time: O(k) sobre las lineas del encargo | Space: O(1)
+        """
+        if not datos:
+            return
+
+        cliente_id = datos.get("cliente_id")
+        for etiqueta, valor in self.clientes_por_etiqueta.items():
+            if valor is not None and cliente_id is not None and int(valor) == int(cliente_id):
+                self.cliente_var.set(etiqueta)
+                break
+
+        if datos.get("observaciones"):
+            self.obs_text.insert("1.0", str(datos["observaciones"]))
+
+        for linea in datos.get("lineas", ()):
+            self._insertar_linea(
+                {
+                    "codigo_articulo": str(linea["codigo_articulo"]),
+                    "cantidad_solicitada": int(linea["cantidad_solicitada"]),
+                    "precio_estimado": float(linea["precio_estimado"]),
+                },
+                self._descripcion(str(linea["codigo_articulo"])),
+            )
+
+    # ------------------------------------------------------------------
+    # Busqueda de articulo
+    # ------------------------------------------------------------------
+
+    def _descripcion(self, codigo: str) -> str:
+        """Descripcion del articulo, o cadena vacia si ya no esta en existencias.
+
+        Time: O(n) sobre el catalogo en memoria | Space: O(1)
+        """
+        for producto in self.catalogo:
+            if str(producto["Codigo articulo"]) == codigo:
+                return str(producto["Descripcion"])
+        return ""
+
+    def _filtrar_lista(self) -> None:
+        """Repuebla la lista con los articulos que casan con la busqueda.
+
+        Time: O(n) sobre el catalogo | Space: O(n)
+        """
+        texto = self.busqueda_var.get().strip().lower()
+        self.listbox.delete(0, tk.END)
+        self._indices_filtrados: list[int] = []
+        for i, prod in enumerate(self.catalogo):
+            codigo = str(prod["Codigo articulo"]).lower()
+            desc = str(prod["Descripcion"]).lower()
+            if texto and texto not in codigo and texto not in desc:
+                continue
+            self.listbox.insert(
+                tk.END, f'{prod["Codigo articulo"]} - {prod["Descripcion"]}'
+            )
+            self._indices_filtrados.append(i)
+
+        if len(self._indices_filtrados) == 1:
+            self.listbox.selection_set(0)
+            self._al_seleccionar(None)
+
+    def _al_seleccionar(self, event) -> None:
+        """Fija el articulo elegido en la lista.
+
+        Time: O(1) | Space: O(1)
+        """
+        seleccion = self.listbox.curselection()
+        if not seleccion:
+            return
+        self.producto_seleccionado = self.catalogo[self._indices_filtrados[seleccion[0]]]
+        self.status_label.config(text="")
+
+    # ------------------------------------------------------------------
+    # Canasta
+    # ------------------------------------------------------------------
+
+    def _cantidad_capturada(self) -> int | None:
+        """Cantidad solicitada, o `None` avisando inline si no sirve.
+
+        Time: O(n) sobre el largo del texto | Space: O(1)
+        """
+        try:
+            cantidad = int(self.cantidad_var.get())
+        except ValueError:
+            self.status_label.config(text="La cantidad solicitada debe ser un número entero.")
+            return None
+        if cantidad <= 0:
+            self.status_label.config(text="La cantidad solicitada debe ser mayor que cero.")
+            return None
+        return cantidad
+
+    def _precio_capturado(self) -> float | None:
+        """Precio estimado, o `None` avisando inline si no sirve.
+
+        Cero es legitimo: al levantar el encargo puede no saberse el precio aun,
+        y la capa core lo admite igual.
+
+        Time: O(n) sobre el largo del texto | Space: O(1)
+        """
+        try:
+            precio = float(self.precio_var.get())
+        except ValueError:
+            self.status_label.config(
+                text="El precio estimado debe ser un número (ej. 150 o 150.50)."
+            )
+            return None
+        if precio < 0:
+            self.status_label.config(text="El precio estimado no puede ser negativo.")
+            return None
+        return precio
+
+    def _agregar_linea(self) -> None:
+        """Empuja el articulo seleccionado a la canasta (R12).
+
+        Time: O(1) | Space: O(1)
+        """
+        self.status_label.config(text="")
+        if not self.producto_seleccionado:
+            self.status_label.config(text="Primero selecciona un artículo de la lista.")
+            return
+
+        cantidad = self._cantidad_capturada()
+        if cantidad is None:
+            return
+        precio = self._precio_capturado()
+        if precio is None:
+            return
+
+        producto = self.producto_seleccionado
+        self._insertar_linea(
+            {
+                "codigo_articulo": str(producto["Codigo articulo"]),
+                "cantidad_solicitada": cantidad,
+                "precio_estimado": precio,
+            },
+            str(producto["Descripcion"]),
+        )
+        self.cantidad_var.set("")
+        self.precio_var.set("")
+
+    def _insertar_linea(self, linea: dict, descripcion: str) -> None:
+        """Agrega `linea` a la canasta con un `iid` propio e irrepetible.
+
+        El `iid` no puede ser la posicion de la fila: al quitar una linea
+        intermedia las posteriores se recorrerian y la seleccion apuntaria a
+        otra linea.
+
+        Time: O(1) | Space: O(1)
+        """
+        self._contador_linea += 1
+        iid = f"L{self._contador_linea}"
+        self.lineas_canasta[iid] = linea
+        importe = linea["cantidad_solicitada"] * linea["precio_estimado"]
+        self.tree_canasta.insert("", "end", iid=iid, values=(
+            linea["codigo_articulo"], descripcion, linea["cantidad_solicitada"],
+            f"${linea['precio_estimado']:.2f}", f"${importe:.2f}",
+        ))
+
+    def _quitar_linea(self) -> None:
+        """Quita de la canasta la(s) linea(s) seleccionada(s) (R12).
+
+        Time: O(k) sobre la seleccion | Space: O(1)
+        """
+        self.status_label.config(text="")
+        seleccion = self.tree_canasta.selection()
+        if not seleccion:
+            self.status_label.config(text="Selecciona una línea de la canasta para quitarla.")
+            return
+        for iid in seleccion:
+            self.lineas_canasta.pop(iid, None)
+            self.tree_canasta.delete(iid)
+
+    def _canasta(self) -> list[dict]:
+        """Lineas de la canasta en el orden en que se capturaron.
+
+        Time: O(n) | Space: O(n)
+        """
+        return [self.lineas_canasta[iid] for iid in self.tree_canasta.get_children()]
+
+    # ------------------------------------------------------------------
+    # Guardado
+    # ------------------------------------------------------------------
+
+    def _guardar(self) -> None:
+        """Valida la peticion y la persiste por la capa core (R11, R12, R13).
+
+        Cliente ausente o canasta vacia cortan **antes** de tocar la base: se
+        avisa por dialogo y no se persiste absolutamente nada (R12).
+
+        Time: O(n) sobre las lineas de la canasta | Space: O(n)
+        """
+        self.status_label.config(text="")
+        cliente_id = self.clientes_por_etiqueta.get(self.cliente_var.get())
+        lineas = self._canasta()
+
+        if cliente_id is None:
+            messagebox.showwarning(APP_TITLE, "Elige el cliente del encargo.")
+            return
+        if not lineas:
+            messagebox.showwarning(
+                APP_TITLE, "El encargo necesita al menos un artículo en la canasta."
+            )
+            return
+
+        encargo_id = self._persistir(cliente_id, lineas)
+        if encargo_id is None:
+            return
+
+        self.app.refrescar_todo()
+        if self.modo == "agregar":
+            self._ofrecer_anticipo(encargo_id, lineas)
+        self.destroy()
+
+    def _persistir(self, cliente_id: int, lineas: list[dict]) -> int | None:
+        """Escribe el encargo; `None` si el dominio lo rechaza (R11, R15).
+
+        `EncargoError` --canasta invalida, cliente o articulo inexistente, o un
+        encargo que ya no esta `Pendiente` al editarlo-- se muestra por dialogo
+        sin dejar escapar la excepcion. Nunca se captura `Exception`
+        (`.langs/python.md` §6).
+
+        Time: O(n log m) sobre las lineas | Space: O(n)
+        """
+        observaciones = self.obs_text.get("1.0", tk.END).strip()
+        try:
+            if self.modo == "agregar":
+                return core.crear_encargo(self.app.conn, cliente_id, lineas, observaciones)
+            core.editar_encargo(
+                self.app.conn, self.encargo_id, cliente_id, lineas, observaciones
+            )
+        except core.EncargoError as e:
+            logger.exception("Fallo el guardado del encargo (modo %s)", self.modo)
+            messagebox.showerror(APP_TITLE, f"No se pudo guardar el encargo:\n{e}")
+            return None
+        return int(self.encargo_id)
+
+    def _ofrecer_anticipo(self, encargo_id: int, lineas: list[dict]) -> None:
+        """Ofrece capturar el anticipo del encargo recien creado (R13).
+
+        **Saltarselo es una respuesta valida**: el anticipo es opcional y el
+        encargo ya quedo guardado con anticipo cero -- `total_anticipado` sale de
+        `encargo_pagos`, que simplemente no tiene filas.
+
+        El total estimado se suma de la canasta ya validada en vez de releer el
+        encargo: son las mismas cifras que el core acaba de escribir.
+
+        Time: O(n) sobre las lineas | Space: O(1)
+        """
+        if not messagebox.askyesno(
+            APP_TITLE, "¿Quieres registrar un anticipo de este encargo ahora?"
+        ):
+            return
+
+        total = sum(
+            linea["cantidad_solicitada"] * linea["precio_estimado"] for linea in lineas
+        )
+        VentanaPagos(
+            self.app,
+            TABLA_PAGOS_ENCARGO,
+            encargo_id,
+            total,
+            f"Anticipos del encargo #{encargo_id}",
+        )
 
 
 # ======================================================================

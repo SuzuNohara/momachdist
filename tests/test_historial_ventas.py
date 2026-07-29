@@ -16,14 +16,17 @@ import pathlib
 import sqlite3
 from collections.abc import Iterator
 from typing import Final
+from unittest import mock
 
 import pytest
 
+import core_historial
 import core_ventas
 import db
+from core_comun import CoreError
 
 RAIZ_PROYECTO: Final[pathlib.Path] = pathlib.Path(__file__).resolve().parent.parent
-VENTAS_PATH: Final[pathlib.Path] = RAIZ_PROYECTO / "core_ventas.py"
+HISTORIAL_PATH: Final[pathlib.Path] = RAIZ_PROYECTO / "core_historial.py"
 
 TIPO_NORMAL: Final[str] = "Normal (con descuento)"
 
@@ -141,7 +144,7 @@ def test_historial_incluye_nombre_cliente(conn: sqlite3.Connection) -> None:
                 lineas=[("11111", 1, 100.0, 180.0)])
 
     # Act
-    historial = core_ventas.obtener_ventas_historial(conn)
+    historial = core_historial.obtener_ventas_historial(conn)
 
     # Assert: sin cliente ligado, la venta es de mostrador
     assert [fila["cliente"] for fila in historial] == ["Ana Lopez", "Mostrador"]
@@ -159,7 +162,7 @@ def test_historial_conserva_claves_detalle(conn: sqlite3.Connection) -> None:
                 lineas=[("11111", 2, 100.0, 180.0)])
 
     # Act
-    fila = core_ventas.obtener_ventas_historial(conn)[0]
+    fila = core_historial.obtener_ventas_historial(conn)[0]
 
     # Assert
     assert CLAVES_DETALLE <= set(fila)
@@ -187,7 +190,7 @@ def test_historial_agrega_total_y_num_productos(conn: sqlite3.Connection) -> Non
     )
 
     # Act
-    historial = core_ventas.obtener_ventas_historial(conn)
+    historial = core_historial.obtener_ventas_historial(conn)
 
     # Assert: los agregados son iguales en todas las filas de la venta
     assert len(historial) == 2
@@ -210,7 +213,7 @@ def test_historial_total_pagado_y_saldo(conn: sqlite3.Connection) -> None:
                 lineas=[("11111", 1, 100.0, 180.0)])
 
     # Act
-    pagada, sin_pagos = core_ventas.obtener_ventas_historial(conn)
+    pagada, sin_pagos = core_historial.obtener_ventas_historial(conn)
 
     # Assert
     assert pagada["total_pagado"] == pytest.approx(150.0)
@@ -226,7 +229,7 @@ def test_historial_total_pagado_y_saldo(conn: sqlite3.Connection) -> None:
 
 def _sql_del_historial() -> ast.Call:
     """Nodo de la unica llamada a `execute` dentro de `obtener_ventas_historial`."""
-    arbol = ast.parse(VENTAS_PATH.read_text(encoding="utf-8"))
+    arbol = ast.parse(HISTORIAL_PATH.read_text(encoding="utf-8"))
     for nodo in ast.walk(arbol):
         if isinstance(nodo, ast.FunctionDef) and nodo.name == "obtener_ventas_historial":
             llamadas = [
@@ -256,7 +259,7 @@ def test_historial_sql_unico_parametrizado(conn: sqlite3.Connection) -> None:
 
     # Act
     try:
-        historial = core_ventas.obtener_ventas_historial(conn)
+        historial = core_historial.obtener_ventas_historial(conn)
     finally:
         conn.set_trace_callback(None)
 
@@ -286,7 +289,7 @@ def test_historial_orden_reciente_primero(conn: sqlite3.Connection) -> None:
     )
 
     # Act
-    ids = [fila["venta_id"] for fila in core_ventas.obtener_ventas_historial(conn)]
+    ids = [fila["venta_id"] for fila in core_historial.obtener_ventas_historial(conn)]
 
     # Assert: mas reciente primero y lineas de una misma venta contiguas
     assert ids == [segunda_hoy, segunda_hoy, primera_hoy, vieja]
@@ -295,7 +298,7 @@ def test_historial_orden_reciente_primero(conn: sqlite3.Connection) -> None:
 def test_historial_bd_vacia_lista_vacia(conn: sqlite3.Connection) -> None:
     # Arrange: conexion recien inicializada
     # Act
-    historial = core_ventas.obtener_ventas_historial(conn)
+    historial = core_historial.obtener_ventas_historial(conn)
 
     # Assert
     assert historial == []
@@ -328,7 +331,7 @@ def test_historial_integracion_cliente_detalle_pagos_saldo(conn: sqlite3.Connect
     )
 
     # Act
-    historial = core_ventas.obtener_ventas_historial(conn)
+    historial = core_historial.obtener_ventas_historial(conn)
 
     # Assert
     del_cliente = [fila for fila in historial if fila["venta_id"] == venta["venta_id"]]
@@ -345,3 +348,40 @@ def test_historial_integracion_cliente_detalle_pagos_saldo(conn: sqlite3.Connect
     assert [fila["cliente"] for fila in mostrador] == ["Mostrador"]
     assert mostrador[0]["total_pagado"] == 0.0
     assert mostrador[0]["saldo_pendiente"] == pytest.approx(190.0)
+
+
+# --- la rama de error: sin este test, `VentaError` puede volver a no existir
+
+
+def test_obtener_ventas_historial_envuelve_el_fallo_de_sqlite_en_venta_error(
+    conn: sqlite3.Connection,
+) -> None:
+    """Un fallo de lectura sale como error de dominio, no crudo.
+
+    Este test existe por un defecto real: al dividir `core_ventas` en escritura
+    y lectura, `VentaError` se quedo del otro lado y este modulo dejo de
+    importarlo, de modo que la rama de error levantaba `NameError`. Como
+    `NameError` no hereda de `CoreError`, habria escapado por el `except
+    CoreError` de la GUI y de `export_excel` -- y la suite seguia verde porque
+    nadie ejercitaba esta rama. Anclarla es lo que impide que vuelva a pasar.
+    """
+    # Arrange: la sentencia del historial apunta a una tabla inexistente
+    sql_roto = "SELECT 1 FROM tabla_que_no_existe"
+
+    # Act / Assert
+    with mock.patch.object(core_historial, "_SQL_HISTORIAL", sql_roto):
+        with pytest.raises(core_ventas.VentaError):
+            core_historial.obtener_ventas_historial(conn)
+
+
+def test_el_error_del_historial_es_capturable_como_error_de_dominio(
+    conn: sqlite3.Connection,
+) -> None:
+    """`VentaError` hereda de `CoreError`: la GUI lo atrapa con un solo except."""
+    # Arrange
+    sql_roto = "SELECT 1 FROM tabla_que_no_existe"
+
+    # Act / Assert
+    with mock.patch.object(core_historial, "_SQL_HISTORIAL", sql_roto):
+        with pytest.raises(CoreError):
+            core_historial.obtener_ventas_historial(conn)

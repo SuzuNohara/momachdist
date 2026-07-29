@@ -13,6 +13,7 @@ dependencias siguen apuntando hacia abajo y no hay ciclos.
 * `obtener_o_crear_semana`   -- upsert idempotente sobre `UNIQUE(semana_texto)`.
 * `actualizar_puntos_semana` -- fija los puntos BW de una semana (BW-02).
 * `procesar_puntos_bw`       -- cablea la extraccion del PDF con la semana (BW-02).
+* `obtener_puntos_por_semana` / `resumen_puntos` -- lecturas del dashboard (BW-03).
 """
 
 from __future__ import annotations
@@ -62,6 +63,26 @@ FROM semanas_catalogo
 ORDER BY anio DESC, numero_semana DESC, semana_texto DESC
 """
 
+#: Orden cronologico ascendente, el que lee la grafica del dashboard (BW-03 R1).
+#: Con `ASC` SQLite pone los `NULL` **primero**, al reves de lo que pide R1, asi
+#: que cada `col IS NULL` (0 antes que 1) manda al final las semanas no
+#: parseables (R6 de BW-01). `NULLS LAST` ataria el build a SQLite >= 3.30.
+SELECT_PUNTOS_POR_SEMANA_SQL: Final[str] = """
+SELECT semana_texto, numero_semana, anio,
+       COALESCE(puntos_bw_acumulados, 0) AS puntos
+FROM semanas_catalogo
+ORDER BY anio IS NULL, anio ASC, numero_semana IS NULL, numero_semana ASC, semana_texto ASC
+"""
+
+#: El mismo criterio invertido, para la cabecera (BW-03 R3). Los `IS NULL` siguen
+#: en ASC: una semana sin fecha no debe ganar como "la mas reciente" por ser NULL.
+SELECT_ULTIMA_SEMANA_SQL: Final[str] = """
+SELECT semana_texto, COALESCE(puntos_bw_acumulados, 0) AS puntos
+FROM semanas_catalogo
+ORDER BY anio IS NULL, anio DESC, numero_semana IS NULL, numero_semana DESC, semana_texto DESC
+LIMIT 1
+"""
+
 #: Claves que expone `listar_semanas`, contrato de la GUI.
 CAMPOS_SEMANA: Final[tuple[str, ...]] = (
     "id",
@@ -70,6 +91,9 @@ CAMPOS_SEMANA: Final[tuple[str, ...]] = (
     "anio",
     "puntos_bw_acumulados",
 )
+
+#: Claves que expone `obtener_puntos_por_semana`, contrato del dashboard.
+CAMPOS_PUNTOS: Final[tuple[str, ...]] = ("semana_texto", "numero_semana", "anio", "puntos")
 
 
 def listar_semanas(conn: sqlite3.Connection) -> list[dict[str, object]]:
@@ -93,6 +117,56 @@ def listar_semanas(conn: sqlite3.Connection) -> list[dict[str, object]]:
     """
     filas = conn.execute(SELECT_SEMANAS_SQL).fetchall()
     return [{campo: fila[campo] for campo in CAMPOS_SEMANA} for fila in filas]
+
+
+def obtener_puntos_por_semana(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    """Serie de puntos BW por semana, en orden cronologico ascendente (R1, R2).
+
+    Alimenta la grafica del dashboard, que se lee de izquierda a derecha. Las
+    semanas sin fecha (texto no parseable, R6 de BW-01) van todas al final.
+
+    **No sustituye a `listar_semanas`, la funcion de aqui arriba** (D11): aquella
+    ordena DESC, incluye `id` y llama `puntos_bw_acumulados` a la columna; la usa
+    el dialogo de correccion manual (W4), que necesita el `id` para escribir. Esta
+    ordena ASC, omite el `id` y la llama `puntos`; la usa el dashboard, que dibuja.
+
+    `puntos` llega siempre como entero: `COALESCE` degrada el `NULL` a `0` (R2).
+
+    Args:
+        conn: conexion inyectada por el call-site (ADR-2).
+
+    Returns:
+        Un diccionario con las claves de `CAMPOS_PUNTOS` por fila del catalogo;
+        lista vacia si no hay ninguna (R4).
+
+    Time: O(n log n) por el ORDER BY | Space: O(n)
+    """
+    filas = conn.execute(SELECT_PUNTOS_POR_SEMANA_SQL).fetchall()
+    return [{campo: fila[campo] for campo in CAMPOS_PUNTOS} for fila in filas]
+
+
+def resumen_puntos(conn: sqlite3.Connection) -> dict[str, object]:
+    """Semana mas reciente del catalogo y sus puntos (R3, R4).
+
+    Cabecera del dashboard. Invierte el criterio de orden de R1 para que cabecera
+    y grafica no discrepen; una semana sin fecha solo gana si es la unica fila.
+
+    Una sola sentencia con `LIMIT 1`: reusar `obtener_puntos_por_semana` y quedarse
+    con el ultimo elemento traeria el catalogo entero para leer una fila (§4).
+
+    Args:
+        conn: conexion inyectada por el call-site (ADR-2).
+
+    Returns:
+        `{"ultima_semana": str, "puntos_ultima": int}`; con el catalogo vacio,
+        `{"ultima_semana": "", "puntos_ultima": 0}` (R4).
+
+    Time: O(n) sobre las filas del catalogo | Space: O(1)
+    """
+    fila = conn.execute(SELECT_ULTIMA_SEMANA_SQL).fetchone()
+    if fila is None:
+        return {"ultima_semana": "", "puntos_ultima": 0}
+    return {"ultima_semana": fila["semana_texto"], "puntos_ultima": int(fila["puntos"])}
 
 
 def _parsear_semana(texto: str | None) -> tuple[int | None, int | None]:

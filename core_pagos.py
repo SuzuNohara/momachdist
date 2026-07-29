@@ -254,14 +254,63 @@ def agregar_pago(
 
     Time: O(log n) por el indice | Space: O(1)
     """
+    # La validacion va ANTES de abrir la transaccion: R4 exige rechazar una
+    # tabla fuera de la whitelist sin tocar la base, y `with conn:` ya es
+    # tocarla. El guard de inyeccion lo comprueba con una conexion centinela
+    # que lanza en `__enter__`.
+    _validar_pago(tabla, forma_pago, monto)
+    try:
+        with conn:
+            return agregar_pago_en_transaccion(
+                conn, tabla, parent_id, forma_pago, monto, fecha
+            )
+    except sqlite3.Error as exc:
+        raise PagoError(f"No se pudo registrar el pago: {exc}") from exc
+
+
+def agregar_pago_en_transaccion(
+    conn: sqlite3.Connection,
+    tabla: str,
+    parent_id: int,
+    forma_pago: str,
+    monto: float,
+    fecha: str | None = None,
+) -> int:
+    """Registra un pago **sin** abrir transaccion propia (R1, R8, R10).
+
+    Variante componible de `agregar_pago`: el limite transaccional lo gobierna el
+    llamador. La usa ENC-03 para traspasar los anticipos de un encargo a la venta
+    dentro de la misma transaccion que crea esa venta, de modo que un fallo a
+    mitad del traspaso revierta tambien la venta.
+
+    Existe por el hallazgo H1 del spike ENC-01: `agregar_pago` cierra su propia
+    transaccion, asi que anidarla dejaba pagos ya committeados si algo fallaba
+    despues -- dinero registrado contra una venta que no llego a existir.
+
+    Las tres validaciones (whitelist de tabla, forma y monto) corren igual y
+    **antes** de tocar la base: la variante componible no relaja ninguna guarda.
+
+    Args:
+        conn: conexion inyectada; el llamador ya abrio la transaccion.
+        tabla: tabla de pago, resuelta contra la whitelist `PAGO_TABLAS`.
+        parent_id: id de la venta/entrega/encargo dueña del pago.
+        forma_pago: una de `FORMAS_PAGO_VALIDAS`.
+        monto: importe positivo.
+        fecha: fecha del pago; `None` usa la fecha local de hoy.
+
+    Returns:
+        El id autogenerado del pago insertado.
+
+    Raises:
+        TablaPagoInvalidaError, FormaPagoInvalidaError, MontoInvalidoError: si
+            la validacion falla, **antes** de tocar la base.
+
+    Time: O(log n) por el indice | Space: O(1)
+    """
     _validar_pago(tabla, forma_pago, monto)
     sql = _SQL_INSERT[tabla]
     valores = (parent_id, _forma_valida(forma_pago), _monto_valido(monto), _fecha_de(fecha))
-    try:
-        with conn:
-            cursor = conn.execute(sql, valores)
-    except sqlite3.Error as exc:
-        raise PagoError(f"No se pudo registrar el pago: {exc}") from exc
+    cursor = conn.execute(sql, valores)
     return int(cursor.lastrowid or 0)
 
 
