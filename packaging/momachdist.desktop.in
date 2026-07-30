@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Inventario Betterware
+GenericName=Inventario y ventas
+Comment=Inventario, ventas, clientes, asociados y encargos de una distribucion Betterware
+Exec=@EXEC@
+TryExec=@EXEC@
+Icon=momachdist
+Terminal=false
+Categories=Office;Finance;
+Keywords=inventario;betterware;ventas;asociados;encargos;remisiones;puntos;
+StartupNotify=true
+StartupWMClass=Momachdist

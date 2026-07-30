@@ -12,7 +12,7 @@ trabajo del día a día: la información vive en un archivo llamado
 "inventario.db" que está junto al programa.
 
 
-PASO 1 — Preparar el programa (SOLO UNA VEZ)
+PASO 1 — Instalar el programa (SOLO UNA VEZ)
 ---------------------------------------------
 Estas instrucciones son para Ubuntu (Linux).
 
@@ -28,27 +28,32 @@ Estas instrucciones son para Ubuntu (Linux).
 
        cd ~/momachdist
 
-4. Copia y pega estas tres líneas, una por una, esperando a que cada
-   una termine:
+4. Copia y pega esta línea:
 
-       python3 -m venv .venv
-       ./.venv/bin/python -m pip install --upgrade pip
-       ./.venv/bin/python -m pip install -r requirements.txt
+       ./instalar.sh
 
-   La última tarda un poco y escribe muchas líneas. Cuando vuelve a
-   aparecer el cursor esperándote, ya terminó.
+   Va a escribir varias líneas y a tardar un poco (está bajando lo que
+   necesita). Cuando termine te dice "Inventario Betterware quedó
+   instalado".
 
 5. Necesitas internet SOLO para este paso 1. Después el programa
    funciona sin internet.
 
+Ya quedó instalado como cualquier otro programa de tu computadora: no
+tienes que volver a abrir la Terminal nunca más, ni conservar esta
+carpeta para usarlo.
+
 
 PASO 2 — Abrir el programa (cada vez que lo uses)
 --------------------------------------------------
-En la Terminal, dentro de la carpeta del programa:
+Búscalo como "Inventario Betterware" en tu menú de aplicaciones (la
+tecla de Windows y escribes "inventario"). Tiene tu logo como icono.
+Puedes arrastrarlo a tus favoritos para tenerlo siempre a mano.
 
-       ./ejecutar.sh
+Si la primera vez no aparece en el menú, cierra tu sesión y vuelve a
+entrar.
 
-Se abre la ventana del programa.
+(Si prefieres la Terminal, también funciona escribiendo: momachdist)
 
 La primera vez que abras, el programa crea su base de datos vacía.
 No te preocupes si al principio todo aparece en cero: es normal,
@@ -150,7 +155,14 @@ ya no sirve para nada. Para reportes usa "📤 Exportar a Excel".
 
 TU INFORMACIÓN: DÓNDE ESTÁ Y CÓMO PROTEGERLA
 ---------------------------------------------
-Junto al programa hay tres cosas:
+Al instalarlo, el programa y tus datos quedan en esta carpeta:
+
+       ~/.local/share/momachdist/
+
+("~" es tu carpeta personal. La carpeta empieza con punto, así que
+está oculta: en el explorador de archivos se ve presionando Ctrl+H.)
+
+Ahí dentro hay tres cosas que te importan:
 
    inventario.db ..... TU NEGOCIO COMPLETO está en este archivo.
                        Es el que debes respaldar.
@@ -166,31 +178,51 @@ las 10:15).
 Recomendación: de vez en cuando copia "inventario.db" a una USB o a
 tu Drive. Es un solo archivo; si se pierde o se daña, se pierde todo.
 
+Reinstalar el programa NO borra tus datos, y desinstalarlo tampoco.
+
 SI ALGO SE DAÑÓ y quieres volver a una copia anterior, pide apoyo
 técnico o sigue esto en la Terminal, con el programa CERRADO:
 
+       cd ~/.local/share/momachdist
        mv inventario.db inventario-mala.db
        ls -lt backups/
        cp backups/EL-ARCHIVO-QUE-ELIJAS.db inventario.db
 
-Y vuelve a abrir el programa con ./ejecutar.sh
+Y vuelve a abrir el programa normal, desde el menú.
+
+
+SI QUIERES DESINSTALARLO
+-------------------------
+En la Terminal, desde la carpeta donde tienes el proyecto:
+
+       ./instalar.sh --desinstalar
+
+Quita el programa del menú pero NO borra tus datos: te dice dónde
+quedaron, por si algún día lo vuelves a instalar.
 
 
 SI ALGO NO FUNCIONA
 --------------------
-"No such file or directory: ./ejecutar.sh"
-   No estás en la carpeta del programa. Usa "cd" para entrar (Paso 1,
-   punto 3).
+No aparece en el menú de aplicaciones
+   Cierra tu sesión y vuelve a entrar. Si sigue sin salir, ábrelo
+   desde la Terminal escribiendo: momachdist
 
-"ModuleNotFoundError: No module named 'tkinter'"
+"momachdist: command not found"
+   El instalador te avisó que faltaba agregar una carpeta a tu PATH.
+   Vuelve a correr ./instalar.sh y lee el aviso, o ábrelo desde el
+   menú de aplicaciones.
+
+"Falta tkinter, que es un paquete del sistema"
    Falta el punto 2 del Paso 1: sudo apt install python3-tk
 
-"ModuleNotFoundError: No module named 'pdfplumber'"
-   Falta el punto 4 del Paso 1 (instalar los requirements).
+"No se pudieron instalar las dependencias"
+   No hay internet, o se cortó. Conéctate y vuelve a correr
+   ./instalar.sh — puedes correrlo tantas veces como quieras.
 
-"no display name and no $DISPLAY environment variable"
-   Estás entrando desde otra computadora. El programa necesita
-   pantalla; ábrelo desde la computadora donde vas a trabajar.
+Las letras se ven pixeladas / con los bordes dentados
+   Repórtalo a soporte técnico: significa que el programa está usando
+   un Python equivocado (uno de Anaconda). Se arregla reinstalando con
+   ./instalar.sh, que ya elige el correcto.
 
 El programa se abre pero un PDF no carga
    Puede ser un PDF con otro formato. El programa te avisa cuál falló
@@ -204,7 +236,7 @@ NOTAS
 -----
 - El programa no necesita internet para funcionar (sólo para
   instalarlo la primera vez).
-- No cambies de nombre ni muevas los archivos "inventario.db" ni la
-  carpeta "reference": el programa los necesita ahí.
-- Puedes tener el programa donde quieras, siempre que muevas la
-  carpeta completa.
+- No muevas ni cambies de nombre nada dentro de
+  ~/.local/share/momachdist — el programa lo necesita tal cual.
+- Para actualizar a una versión nueva, vuelve a correr ./instalar.sh
+  desde la carpeta del proyecto. Tus datos se conservan.

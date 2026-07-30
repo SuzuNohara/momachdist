@@ -12,9 +12,42 @@ programa. No usa red, no tiene autenticación y no necesita servidor.
 
 ---
 
-## 1. Ejecución en Ubuntu (Python)
+## 0. Instalarlo como programa del sistema
 
-Probado en Ubuntu 24.04 LTS con Python 3.13.5, sesión X11 (`DISPLAY=:1`).
+Para **usarlo** (no desarrollarlo), esta es la vía. Instala por usuario, sin sudo:
+
+```bash
+./instalar.sh
+```
+
+Queda "Inventario Betterware" en el menú de aplicaciones con su icono, y el
+comando `momachdist` en la terminal. Qué deja, con el prefix por omisión:
+
+| Ruta | Qué |
+|---|---|
+| `~/.local/share/momachdist/` | Programa + su propio venv |
+| `~/.local/share/momachdist/inventario.db` | **Los datos.** Nunca se sobreescriben al reinstalar |
+| `~/.local/bin/momachdist` | Lanzador de terminal |
+| `~/.local/share/applications/momachdist.desktop` | Entrada del menú |
+| `~/.local/share/icons/hicolor/*/apps/momachdist.png` | Icono, 7 tamaños (16–256) |
+
+```bash
+./instalar.sh --prefix /otra/ruta   # otro destino
+./instalar.sh --desinstalar         # quita el programa, CONSERVA los datos
+./instalar.sh --help
+```
+
+Reinstalar sobre una instalación existente actualiza el código y reusa el venv
+sin tocar `inventario.db` (verificado por checksum). La desinstalación jamás
+borra datos: imprime dónde quedaron y el comando para borrarlos a mano.
+
+El instalador fija `/usr/bin/python3` a propósito — ver la advertencia de §1.2.
+
+---
+
+## 1. Ejecución para desarrollo
+
+Probado en Ubuntu 24.04 LTS, sesión X11 (`DISPLAY=:1`).
 
 ### 1.1 Requisito del sistema: tkinter
 
@@ -30,10 +63,25 @@ falta compiladores ni librerías de sistema.
 
 ### 1.2 Preparar el entorno virtual (una sola vez)
 
+> ⚠️ **Usa `/usr/bin/python3` explícitamente, no `python3`.** Si tienes Anaconda
+> (o cualquier conda) en el `PATH`, `python3` resuelve al de Anaconda, y **su Tk
+> está compilado sin Xft**: no ve las fuentes de fontconfig (60 familias X core
+> en vez de 425), cae a `nimbus sans l` sin antialiasing y **toda la aplicación
+> se ve pixelada**. No es un problema del código: las 109 declaraciones
+> `font=("Arial", …)` están bien, y con el Tk correcto fontconfig sustituye Arial
+> por **Arimo**, que es métricamente compatible.
+>
+> Cómo confirmar qué Tk tienes:
+> ```bash
+> ldd "$(./.venv/bin/python -c 'import _tkinter; print(_tkinter.__file__)')" | grep -c libXft
+> ```
+> `1` = correcto. `0` = tu Tk no tiene Xft; recrea el venv con `/usr/bin/python3`.
+> Lo vigila `tests/test_instalacion.py::test_el_instalador_fija_el_interprete_del_sistema`.
+
 Desde la raíz del repo:
 
 ```bash
-python3 -m venv .venv
+/usr/bin/python3 -m venv .venv
 ./.venv/bin/python -m pip install --upgrade pip
 ./.venv/bin/python -m pip install -r requirements.txt
 ```
@@ -85,12 +133,31 @@ xvfb-run -a ./.venv/bin/python gui_inventario.py
 La suite de tests, en cambio, **no** necesita display: verifica la GUI por AST y
 importando el módulo, nunca abriendo ventanas.
 
-### 1.6 Empaquetado
+### 1.6 Empaquetado y distribución
 
-Hoy **no hay** empaquetado en el repo: ni `generar_ejecutable.bat`, ni `.spec`,
-ni `pyinstaller` en los requirements. La forma soportada de ejecutar es Python
-directo, como arriba. `db.ruta_base()` ya contempla `sys.frozen`, así que el
-código está listo para PyInstaller cuando se decida armar el `.exe` de Windows.
+**Linux: `./instalar.sh`** (§0). No congela un binario: instala el árbol de
+módulos con su propio venv y lo registra en el escritorio (`.desktop` + iconos
+en el tema hicolor). Es la forma idiomática de distribuir una app Python/tkinter
+en Linux, y no necesita ninguna dependencia nueva.
+
+| Pieza | Archivo |
+|---|---|
+| Script de instalación / desinstalación | `instalar.sh` |
+| Plantilla de la entrada de menú | `packaging/momachdist.desktop.in` (el instalador sustituye `@EXEC@`) |
+| Arte original del icono | `assets/momachdist_logo.png` |
+| Iconos generados | `assets/icons/momachdist-{16,24,32,48,64,128,256}.png` + `momachdist.png` (maestro 306×306) |
+
+Los iconos se generan recortando el arte a su contenido visible (bbox
+280×284 dentro de un lienzo 676×369 con márgenes transparentes) y encuadrándolo
+con 4% de aire. **No se genera un 512×512**: el arte original mide 306 px y un
+512 sería un upscale borroso.
+
+Para regenerar los iconos tras cambiar el arte, ver el bloque de generación en el
+historial de este commit; requiere Pillow (dependencia transitiva de pdfplumber).
+
+**Windows (`.exe`): sigue pendiente.** No hay `generar_ejecutable.bat`, `.spec` ni
+`pyinstaller`. `db.ruta_base()` ya contempla `sys.frozen`, así que el código está
+listo. Registrado como DEUDA-11.
 
 ---
 
@@ -98,9 +165,10 @@ código está listo para PyInstaller cuando se decida armar el `.exe` de Windows
 
 | Aspecto | Detalle |
 |---|---|
-| Lenguaje | Python 3.13.5 (mínimo 3.12; el código usa `X \| Y`, `from __future__ import annotations`, `datetime.UTC`) |
+| Lenguaje | **Python 3.12.3 del sistema** (`/usr/bin/python3`; mínimo 3.12 — el código usa `X \| Y`, `from __future__ import annotations`, `datetime.UTC`) |
 | Almacenamiento | SQLite 3.45.3 vía `sqlite3` de stdlib — **sin ORM** (ADR-1) |
-| GUI | tkinter / ttk (`python3-tk` del sistema) |
+| GUI | tkinter / ttk (`python3-tk` del sistema) — **su Tk debe traer Xft**, ver §1.2 |
+| Fuentes | Se piden como `"Arial"`; fontconfig las sirve como **Arimo** (métricamente compatible, antialiaseada) |
 | Parsing PDF | `pdfplumber` 0.11.10 (ADR-4) |
 | Reportes | `openpyxl` 3.1.5 — sólo para "Exportar a Excel" |
 | Tests | `pytest` 9.1.1 — **1034 tests, ~27 s** |
@@ -270,6 +338,7 @@ ante bugs de lógica. Si tocas algo cerca, entiéndelos antes:
 | `tests/test_gui_cableado.py` | Importa la GUI **y** compara por AST todas sus referencias `core.*` contra la fachada. Allowlist `PENDIENTES_CLI04`, hoy **vacía** |
 | `tests/test_sql_parametrizado.py` | Ningún SQL de la capa de datos se interpola |
 | `tests/test_backup.py` | Toda operación de dominio llamada desde la GUI está protegida con bitácora + aviso (`MODULOS_DOMINIO`) |
+| `tests/test_instalacion.py` | El empaquetado no se queda atrás: `instalar.sh` copia **exactamente** los módulos que existen (descubiertos por glob), los iconos que la GUI declara existen y miden lo que dicen, el `StartupWMClass` del `.desktop` coincide con el de la ventana, y la desinstalación no puede borrar datos |
 
 Las allowlists de estos guards **sólo pueden encoger**. Hay tests que fallan si
 dejas ahí algo ya resuelto.
@@ -304,8 +373,11 @@ antes de que reventara. `test_gui_cableado.py` es la red permanente contra eso.
 | `conftest.py` | Inserta `reference/` y la raíz en `sys.path` |
 | `test_db.py` | Tests de `db.py` — **quedó en la raíz**, no en `tests/` |
 | `spikes/` | Spikes de investigación (ENC-01). No es código de producción |
-| `reference/` | **READ-ONLY.** Diseño y código originales. Nunca se modifica |
-| `ejecutar.sh` | Lanzador para Ubuntu |
+| `reference/` | **READ-ONLY.** Diseño y código originales. Nunca se modifica. `db_schema.sql` sí es runtime |
+| `ejecutar.sh` | Lanzador para desarrollo, desde el árbol del repo |
+| `instalar.sh` | Instala / desinstala el programa en el sistema (§0) |
+| `packaging/` | `momachdist.desktop.in`, plantilla de la entrada de menú |
+| `assets/` | `momachdist_logo.png` (arte original) e `icons/` (los 8 PNG generados) |
 
 ---
 
@@ -321,14 +393,17 @@ Registradas como deuda en NOVA (`.activities/active.md`), ninguna bloquea el uso
 | DEUDA-07 | Dos `except Exception` en `gui_inventario.py` violan `.langs/python.md` §6 |
 | DEUDA-08 | `core_semanas.py` en 399/400 líneas, sin holgura |
 | DEUDA-09 | `core_pagos.agregar_pago` no valida el estado del padre: un abono contra un encargo `Cancelado` se escribe. Hoy la única barrera es el gating del botón en la GUI |
-
 | DEUDA-10 | El botón "📁 Abrir Excel" es código muerto y su mensaje engaña: apunta a `inventario_betterware.xlsx`, que ya nadie escribe tras la migración, así que siempre responde *"Todavía no existe el Excel. Primero procesa al menos un PDF"* — y procesar un PDF no lo va a crear. Para reportes el botón correcto es "📤 Exportar a Excel". Falta decidir si se retira el botón o se corrige el mensaje |
+| DEUDA-11 | **Windows sin empaquetar.** La instalación en Linux ya existe (§0); el `.exe` con PyInstaller que pide el DoD del plan no. Requiere aprobar `pyinstaller` y decidir si Windows sigue siendo un target |
+| DEUDA-12 | Sin función de restore (es manual, §5.3) y `backups/` no se purga nunca |
 
 **Además, sin registrar:**
 
 - No hay lockfile ni pineado por hash; sólo versiones exactas.
-- `backups/` no se purga nunca — crece un archivo por arranque.
-- Sin empaquetado en el repo (ver §1.6).
+- El icono maestro es de 306 px: si algún día se necesita un 512 nítido, hay que
+  rehacer el arte, no reescalarlo.
+- `gui_inventario.py` tiene su propia copia de `ruta_base()`, duplicando la de
+  `db.py`. Las dos hacen lo mismo, incluido el caso `sys.frozen`.
 
 ## 9. Decisiones de negocio ya codificadas
 

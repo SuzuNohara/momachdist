@@ -165,6 +165,27 @@ EXCEL_PATH = os.path.join(ruta_base(), "inventario_betterware.xlsx")
 DB_PATH = str(backup.ruta_db())
 LOG_PATH = str(backup.ruta_log())
 
+# Carpeta de los iconos de la aplicacion, generados desde
+# `assets/momachdist_logo.png`. Viaja con el programa, asi que se resuelve
+# contra `ruta_base()` igual que el resto de artefactos.
+ICONOS_DIR: Final[str] = os.path.join(ruta_base(), "assets", "icons")
+
+# Tamanos que se le pasan a `iconphoto`, del mayor al menor: el gestor de
+# ventanas elige el que le acomode para la barra de titulo, el dock y el
+# conmutador de ventanas. El maestro sin sufijo va primero por ser el de mayor
+# resolucion disponible.
+ICONOS_VENTANA: Final[tuple[str, ...]] = (
+    "momachdist.png",
+    "momachdist-128.png",
+    "momachdist-64.png",
+    "momachdist-48.png",
+)
+
+# Clase WM de la ventana. El archivo `.desktop` que instala `instalar.sh`
+# declara `StartupWMClass=Momachdist`: si ambos no coinciden, el escritorio no
+# asocia la ventana con el lanzador y muestra un icono generico.
+WM_CLASS: Final[str] = "Momachdist"
+
 
 # ======================================================================
 # Ventana principal
@@ -172,7 +193,10 @@ LOG_PATH = str(backup.ruta_log())
 
 class App(tk.Tk):
     def __init__(self):
-        super().__init__()
+        # `className` fija la clase WM de la ventana, que es lo que el
+        # escritorio cruza contra `StartupWMClass` del `.desktop` para asociar
+        # la ventana con su lanzador y su icono.
+        super().__init__(className=WM_CLASS)
         backup.startup(DB_PATH, LOG_PATH)
         # Conexion unica de la sesion, inyectada en cada llamada a `core`
         # (ADR-2: la capa core nunca abre conexiones por su cuenta). `init_db`
@@ -183,6 +207,7 @@ class App(tk.Tk):
         self.title(APP_TITLE)
         self.geometry("1150x720")
         self.configure(bg="#FFFFFF")
+        self._aplicar_icono()
 
         self._construir_barra_superior()
 
@@ -214,6 +239,42 @@ class App(tk.Tk):
         self.status_bar.pack(fill="x", side="bottom")
 
         self.refrescar_todo()
+
+    def _aplicar_icono(self) -> None:
+        """Pone el icono de la aplicacion en la ventana, el dock y el Alt-Tab.
+
+        Nunca aborta el arranque: si los PNG no estan -- instalacion incompleta,
+        o ejecucion desde un arbol sin `assets/` -- lo deja anotado en la
+        bitacora y sigue con el icono generico. El programa es usable sin icono.
+
+        La referencia a las imagenes se guarda en `self._iconos` a proposito: Tk
+        no retiene los `PhotoImage`, y sin esa referencia el recolector se los
+        lleva y la ventana vuelve al icono por defecto.
+
+        Time: O(n) sobre los tamanos disponibles | Space: O(n)
+        """
+        imagenes: list[tk.PhotoImage] = []
+        for nombre in ICONOS_VENTANA:
+            ruta = os.path.join(ICONOS_DIR, nombre)
+            if not os.path.isfile(ruta):
+                continue
+            try:
+                imagenes.append(tk.PhotoImage(file=ruta))
+            except tk.TclError:
+                logger.exception("No se pudo cargar el icono %s", ruta)
+
+        if not imagenes:
+            logger.warning(
+                "No hay iconos en %s; la ventana usara el icono generico.",
+                ICONOS_DIR,
+            )
+            return
+
+        self._iconos: tuple[tk.PhotoImage, ...] = tuple(imagenes)
+        try:
+            self.iconphoto(True, *self._iconos)
+        except tk.TclError:
+            logger.exception("El gestor de ventanas rechazo el icono.")
 
     def _construir_barra_superior(self):
         barra = tk.Frame(self, bg=COLOR_MARCA, height=55)

@@ -19,8 +19,8 @@ PY="./.venv/bin/python"
 if [[ ! -x "$PY" ]]; then
     echo "ERROR: no existe el entorno virtual ($PY)." >&2
     echo >&2
-    echo "Crealo con:" >&2
-    echo "    python3 -m venv .venv" >&2
+    echo "Crealo con (nota el /usr/bin/ explicito, ver README 1.2):" >&2
+    echo "    /usr/bin/python3 -m venv .venv" >&2
     echo "    ./.venv/bin/python -m pip install -r requirements.txt" >&2
     exit 1
 fi
@@ -31,6 +31,20 @@ if ! "$PY" -c "import tkinter" 2>/dev/null; then
     echo "Instalalo con:" >&2
     echo "    sudo apt install python3-tk" >&2
     exit 1
+fi
+
+# Un Tk sin Xft no ve las fuentes de fontconfig y cae a fuentes X core sin
+# antialiasing: la aplicacion arranca, pero se ve pixeleada. Le pasa al Python
+# de Anaconda, que es facil de heredar del PATH al crear el venv. Se avisa y se
+# continua: es un defecto de presentacion, no un impedimento.
+if ! "$PY" - <<'PY' 2>/dev/null
+import subprocess, _tkinter, sys
+salida = subprocess.run(["ldd", _tkinter.__file__], capture_output=True, text=True).stdout
+sys.exit(0 if "libXft" in salida else 1)
+PY
+then
+    echo "AVISO: el Tk de este venv no enlaza libXft; las letras se veran" >&2
+    echo "       pixeleadas. Recrea el venv con /usr/bin/python3 (README 1.2)." >&2
 fi
 
 if ! "$PY" -c "import pdfplumber, openpyxl" 2>/dev/null; then
