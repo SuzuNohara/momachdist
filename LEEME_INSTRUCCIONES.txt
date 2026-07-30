@@ -1,0 +1,210 @@
+INVENTARIO BETTERWARE — INSTRUCCIONES
+========================================
+
+QUÉ HACE ESTE PROGRAMA
+-----------------------
+Lee tus remisiones de pedido de Betterware (PDF) y lleva tu inventario,
+tus ventas, tus clientes, lo que le entregas a cada asociado con su
+saldo, los encargos que te piden y tus puntos Betterware por semana.
+
+Todo desde una sola ventana con pestañas. Ya NO se usa Excel para el
+trabajo del día a día: la información vive en un archivo llamado
+"inventario.db" que está junto al programa.
+
+
+PASO 1 — Preparar el programa (SOLO UNA VEZ)
+---------------------------------------------
+Estas instrucciones son para Ubuntu (Linux).
+
+1. Abre la aplicación "Terminal".
+
+2. Copia y pega esta línea, y presiona Enter. Te va a pedir tu
+   contraseña (al escribirla no se ve nada, es normal):
+
+       sudo apt install python3-tk
+
+3. Entra a la carpeta del programa. Si la carpeta está en tu carpeta
+   personal y se llama "momachdist", es:
+
+       cd ~/momachdist
+
+4. Copia y pega estas tres líneas, una por una, esperando a que cada
+   una termine:
+
+       python3 -m venv .venv
+       ./.venv/bin/python -m pip install --upgrade pip
+       ./.venv/bin/python -m pip install -r requirements.txt
+
+   La última tarda un poco y escribe muchas líneas. Cuando vuelve a
+   aparecer el cursor esperándote, ya terminó.
+
+5. Necesitas internet SOLO para este paso 1. Después el programa
+   funciona sin internet.
+
+
+PASO 2 — Abrir el programa (cada vez que lo uses)
+--------------------------------------------------
+En la Terminal, dentro de la carpeta del programa:
+
+       ./ejecutar.sh
+
+Se abre la ventana del programa.
+
+La primera vez que abras, el programa crea su base de datos vacía.
+No te preocupes si al principio todo aparece en cero: es normal,
+todavía no has cargado ningún pedido.
+
+
+PASO 3 — Cargar un pedido nuevo
+-----------------------------------
+1. Botón "📄 Cargar PDF(s)", arriba de la ventana.
+
+2. Elige uno o varios PDFs de tus remisiones. Un mismo PDF puede
+   traer varias notas de asociados distintos; el programa las separa
+   solo y le asigna a cada nota su asociado.
+
+3. Se abre una VISTA PREVIA con todos los productos. Aquí puedes:
+
+    - Doble clic sobre "Cant. total", "Asociado", "Casa", "Local",
+      "Precio catálogo", "Precio con IVA" o "Precio que pagas" para
+      corregir cualquier valor (útil para promociones y regalos).
+
+    - IMPORTANTE: Asociado + Casa + Local debe sumar la Cant. total.
+      El programa no te deja confirmar si no cuadra.
+
+    - Lo que pongas en "Asociado" NO cuenta como tu inventario (es
+      del asociado, y te lo debe). Lo que pongas en "Casa" o "Local"
+      SÍ es tu inventario y es lo que puedes vender.
+
+4. "Confirmar y cargar al inventario".
+
+Si el asociado que viene en la nota todavía no está en tu directorio,
+el programa lo da de alta solo.
+
+Puedes cargar PDFs las veces que quieras; nunca se borra lo que ya
+tenías.
+
+
+PASO 4 — Las pestañas del programa
+-------------------------------------
+
+📊 DASHBOARD
+   Resumen general: piezas en stock, valor de tu inventario, ventas,
+   ganancia, pedidos cargados y cuánto te deben los asociados. Abajo,
+   los productos con poco inventario (en rojo) y tus puntos
+   Betterware por semana.
+
+📦 INVENTARIO
+   Todos tus productos con piezas recibidas, vendidas y disponibles,
+   y tu costo real. Busca por código o nombre. Puedes seleccionar un
+   producto y venderlo directo desde aquí.
+
+🧾 PEDIDOS
+   Todo lo que has cargado de tus PDFs, con filtros por producto,
+   asociado, semana o folio. Ves cómo se repartió cada producto
+   (Asociado / Casa / Local).
+
+🛒 VENTAS
+   Historial de ventas. Con "Registrar venta" capturas una nueva:
+   puedes poner VARIOS productos en la misma venta, ligarla a un
+   cliente (o dejarla como mostrador) y registrar los abonos que te
+   vayan pagando. Si no hay inventario suficiente, el programa no te
+   deja continuar.
+
+🤝 ENTREGAS ASOCIADO
+   Cada vez que marcas piezas como "Asociado" al cargar un pedido,
+   aparecen aquí con el monto que te deben. Doble clic sobre una
+   entrega para cambiar su status y registrar pagos. Puedes registrar
+   TODOS los abonos que quieras, cada uno con su fecha y su forma de
+   pago; el saldo baja solo.
+
+👥 ASOCIADOS
+   Tu directorio: nombre, teléfono, notas y el saldo que te debe cada
+   uno. Botón "Enviar WhatsApp" que abre WhatsApp directo con ese
+   contacto.
+
+👥 CLIENTES
+   Tu directorio de compradores finales, aparte de los asociados.
+   Sirve para ligar ventas y encargos a una persona y saber su
+   historial.
+
+📝 ENCARGOS
+   Cuando alguien te pide algo que no tienes: registras el encargo
+   con su cliente y sus productos, y puedes cobrar un anticipo (o
+   varios abonos). Cuando llega la mercancía le das "Surtir" y el
+   encargo se convierte en venta solo, con el anticipo ya aplicado.
+   También puedes cancelarlo.
+
+
+BOTONES DE ARRIBA
+-----------------
+📄 Cargar PDF(s) ....... cargar remisiones (Paso 3)
+🛒 Registrar venta ..... venta nueva sin entrar a la pestaña
+🏅 Puntos Betterware ... corregir a mano los puntos de una semana
+🔄 Actualizar vistas ... recargar los números de todas las pestañas
+📤 Exportar a Excel .... generar un reporte .xlsx donde tú elijas
+
+Nota: el botón "📁 Abrir Excel" es de la versión vieja del programa y
+ya no sirve para nada. Para reportes usa "📤 Exportar a Excel".
+
+
+TU INFORMACIÓN: DÓNDE ESTÁ Y CÓMO PROTEGERLA
+---------------------------------------------
+Junto al programa hay tres cosas:
+
+   inventario.db ..... TU NEGOCIO COMPLETO está en este archivo.
+                       Es el que debes respaldar.
+   backups/ .......... copias de seguridad automáticas
+   inventario.log .... anotaciones de errores (para quien te dé
+                       soporte técnico)
+
+CADA VEZ que abres el programa, se guarda solo una copia de seguridad
+en la carpeta "backups". Las copias se llaman con su fecha y hora,
+por ejemplo "inventario-20260729-101500.db" (29 de julio de 2026, a
+las 10:15).
+
+Recomendación: de vez en cuando copia "inventario.db" a una USB o a
+tu Drive. Es un solo archivo; si se pierde o se daña, se pierde todo.
+
+SI ALGO SE DAÑÓ y quieres volver a una copia anterior, pide apoyo
+técnico o sigue esto en la Terminal, con el programa CERRADO:
+
+       mv inventario.db inventario-mala.db
+       ls -lt backups/
+       cp backups/EL-ARCHIVO-QUE-ELIJAS.db inventario.db
+
+Y vuelve a abrir el programa con ./ejecutar.sh
+
+
+SI ALGO NO FUNCIONA
+--------------------
+"No such file or directory: ./ejecutar.sh"
+   No estás en la carpeta del programa. Usa "cd" para entrar (Paso 1,
+   punto 3).
+
+"ModuleNotFoundError: No module named 'tkinter'"
+   Falta el punto 2 del Paso 1: sudo apt install python3-tk
+
+"ModuleNotFoundError: No module named 'pdfplumber'"
+   Falta el punto 4 del Paso 1 (instalar los requirements).
+
+"no display name and no $DISPLAY environment variable"
+   Estás entrando desde otra computadora. El programa necesita
+   pantalla; ábrelo desde la computadora donde vas a trabajar.
+
+El programa se abre pero un PDF no carga
+   Puede ser un PDF con otro formato. El programa te avisa cuál falló
+   y carga los demás. Guarda ese PDF para revisarlo con soporte.
+
+Cualquier otro error: el archivo "inventario.log" tiene el detalle.
+Mándalo a quien te dé soporte.
+
+
+NOTAS
+-----
+- El programa no necesita internet para funcionar (sólo para
+  instalarlo la primera vez).
+- No cambies de nombre ni muevas los archivos "inventario.db" ni la
+  carpeta "reference": el programa los necesita ahí.
+- Puedes tener el programa donde quieras, siempre que muevas la
+  carpeta completa.

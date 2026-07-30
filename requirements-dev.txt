@@ -1,4 +1,15 @@
-pdfplumber
-pandas
-openpyxl
-pytest
+# Dependencias de DESARROLLO. Incluye las de runtime.
+#
+# Instalar con:
+#     ./.venv/bin/python -m pip install -r requirements-dev.txt
+
+-r requirements.txt
+
+pytest==9.1.1
+
+# `pandas` NO se importa en ningun modulo de produccion ni en ningun test.
+# Lo necesita solo `tests/generate_baseline.py`, que importa
+# `reference/inventario_core.py` (el codigo viejo de Excel) para regenerar el
+# golden de caracterizacion del parsing. No lo quites sin sustituir antes ese
+# generador. Ver README seccion 2.
+pandas==3.0.5

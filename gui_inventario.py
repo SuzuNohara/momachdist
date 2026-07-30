@@ -1,20 +1,29 @@
 """
 Interfaz grafica del Inventario Betterware, con panel de pestanas:
 
- - Dashboard: resumen general (piezas en stock, ventas, alertas).
+ - Dashboard: resumen general (piezas en stock, ventas, alertas, puntos
+   Betterware por semana).
  - Inventario: existencias actuales, con buscador.
  - Pedidos: historial completo de remisiones cargadas, filtrable por
    producto, codigo, asociado o semana.
- - Ventas: historial de ventas registradas + boton para registrar una
-   venta nueva.
- - Entregas Asociado: productos entregados a asociados, con status y
-   forma(s) de pago administrables desde aqui (no en Excel).
- - Asociados: directorio de asociados (nombre, telefono, notas) con
-   boton para abrir WhatsApp directo.
+ - Ventas: historial de ventas multi-producto + boton para registrar una
+   venta nueva, ligada a cliente y con N abonos.
+ - Entregas Asociado: productos entregados a asociados, con status y N
+   abonos administrables desde aqui.
+ - Asociados: directorio de asociados (nombre, telefono, notas, saldo)
+   con boton para abrir WhatsApp directo.
+ - Clientes: directorio de compradores finales (CRM), separado de los
+   asociados.
+ - Encargos: pedidos de cliente sin stock, con anticipo opcional y
+   conversion a venta al surtirse.
 
-El Excel maestro se guarda siempre junto al programa, con el nombre
-"inventario_betterware.xlsx", y funciona como respaldo/consulta: toda
-la operacion del dia a dia se hace desde esta interfaz.
+Este modulo es la capa de presentacion y nunca ejecuta SQL (ADR-2): todo
+pasa por la fachada `core`, a la que se le inyecta la conexion unica de la
+sesion (`self.conn`, abierta en `App.__init__`).
+
+El estado vive en `inventario.db` (SQLite) junto al programa; `backup.startup`
+saca una copia timestamped en cada arranque. El Excel dejo de ser el
+almacenamiento: `export_excel` solo genera reportes a demanda.
 """
 
 import datetime

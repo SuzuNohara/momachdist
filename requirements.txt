@@ -1,0 +1,14 @@
+# Dependencias de RUNTIME de Inventario Betterware.
+#
+# Instalar con:
+#     ./.venv/bin/python -m pip install -r requirements.txt
+#
+# `tkinter` NO va aqui: es un paquete del sistema, no de pip.
+#     sudo apt install python3-tk
+#
+# Versiones exactas a proposito: 4 tests estan anclados al layout que
+# devuelve pdfplumber, asi que una actualizacion silenciosa los rompe.
+# Ver README seccion 8 (DEUDA-01).
+
+pdfplumber==0.11.10   # pdf_extractor.py — unica lectura de PDF
+openpyxl==3.1.5       # export_excel.py — reporte .xlsx
